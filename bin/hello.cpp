@@ -10,9 +10,11 @@ int main(int argc, char **argv)
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
   CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &size));
 
+  int status = 0;
+
   if (size != 2) {
     std::cerr << "Run with 2 ranks" << std::endl;
-    return 1;
+    status = 1;
   } else {
     MPI_Request req;
     int msg = 0;
@@ -29,5 +31,5 @@ int main(int argc, char **argv)
   }
 
   CHECK_MPI(MPI_Finalize());
-  return 0;
+  return status;
 }

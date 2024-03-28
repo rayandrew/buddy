@@ -37,8 +37,6 @@ int MPI_Finalize()
 
   CHECK_MPI(real_MPI_Finalize());
 
-  buddy::host::init();
-
   return 0;
 }
 
