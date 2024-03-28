@@ -12,6 +12,7 @@ int main(int argc, char **argv)
 
   if (size != 2) {
     std::cerr << "Run with 2 ranks" << std::endl;
+    return 1;
   } else {
     MPI_Request req;
     int msg = 0;
