@@ -5,6 +5,7 @@
 #include "host_buffer.h"
 #include "dpu_conn.h"
 #include "util.h"
+#include "rdma.h"
 
 namespace buddy::host {
 
@@ -21,6 +22,8 @@ DpuConn dpu_conn;
 
 void init()
 {
+  rdma::init();
+
   send_buf = (char *)malloc(SEND_BUFFER_SIZE);
   send_bytes = 0;
 
@@ -52,6 +55,13 @@ void flush()
 {
   if (send_bytes == 0)
     return;
+
+  char hej[] = "hej";
+  std::cout << "send..." << std::endl;
+  dpu_conn.qp.send_imm_inline(0, hej, sizeof(hej));
+  std::cout << "wait..." << std::endl;
+  dpu_conn.qp.wait_op(IBV_WC_SEND);
+  std::cout << "done!" << std::endl;
 
   MPI_Send(&send_bytes, 1, MPI_UNSIGNED_LONG, !world_rank, 0, MPI_COMM_WORLD);
   MPI_Send(send_buf, send_bytes, MPI_BYTE, !world_rank, 0, MPI_COMM_WORLD);

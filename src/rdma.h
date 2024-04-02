@@ -16,8 +16,8 @@ struct server_cqs {
   server_cqs();
 
   ibv_srq *srq;
-  ibv_cq *send_cq;
-  ibv_cq *recv_cq;
+  ibv_cq *send;
+  ibv_cq *recv;
 };
 
 class Context {
@@ -27,6 +27,8 @@ class Context {
       ibv_context* get_ctx(){return ctx;}
       ibv_pd* get_pd(){return pd;}
       const IBDest *get_local_dest_template() {return &local_dest_template;}
+
+      static Context& get();
 
   private:
       IBDest local_dest_template = {};
@@ -43,9 +45,9 @@ class QP {
     ~QP();
 
     void send(ibv_mr *mr, void *buf, unsigned len, uint64_t wr_id);
-    void send_imm(int tag, ibv_mr *mr, unsigned len);
-    void send_imm_inline(int tag, void *buf, unsigned len);
-    void write_imm(int tag, void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey, uint64_t wr_id);
+    void send_imm(uint32_t tag, ibv_mr *mr, unsigned len);
+    void send_imm_inline(uint32_t tag, void *buf, unsigned len);
+    void write_imm(uint32_t tag, void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey, uint64_t wr_id);
     void write(void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey);
     void read(void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey);
     void recv(ibv_mr *mr, unsigned len);

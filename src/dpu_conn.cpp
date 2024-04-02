@@ -8,17 +8,11 @@
 
 namespace buddy::host {
 
-DpuConn::DpuConn()
-  : initialized(false)
-{}
-
 DpuConn::DpuConn(int world_rank, int world_size)
   : initialized(true)
 {
   char *host = getenv("BUDDY_DPU");
   CHECK(host && *host);
-
-  rdma::init();
 
   int sock = tcp_connect(host, LOCAL_PORT);
 
@@ -28,7 +22,7 @@ DpuConn::DpuConn(int world_rank, int world_size)
   };
   full_write(sock, (char *)&msg, sizeof(msg));
 
-  qp = rdma::QP(sock);
+  new (&qp) rdma::QP(sock);
 
   close(sock);
 }

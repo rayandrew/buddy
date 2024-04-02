@@ -5,6 +5,7 @@
 #include "local_proto.h"
 #include "util.h"
 #include "rdma.h"
+#include "proxy.h"
 
 int main(int argc, char **argv)
 {
@@ -45,6 +46,11 @@ int main(int argc, char **argv)
   auto qps = new buddy::rdma::QP[conn_count];
 
   for (int i = 0; i < conn_count; i++) {
-    qps[i] = buddy::rdma::QP(cqs, conn_list[i]);
+    new (&qps[i]) buddy::rdma::QP(cqs, conn_list[i]);
   }
+
+  buddy::dpu::ProxyConfig config;
+
+  buddy::dpu::Proxy proxy(config, cqs, conn_count, qps);
+  proxy.rdma_loop();
 }

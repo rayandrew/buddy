@@ -31,6 +31,14 @@ Context::~Context()
     }
 }
 
+Context& Context::get()
+{
+  if (!context.get_ctx())
+    context.init();
+
+  return context;
+}
+
 void Context::init()
 {
   struct ibv_device **dev_list;
@@ -133,8 +141,8 @@ server_cqs::server_cqs()
     FAIL("failed to create srq");
   }
 
-  send_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
-  recv_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+  send = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+  recv = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
 }
 
 QP::QP(int connfd)
@@ -153,8 +161,8 @@ QP::QP(int connfd)
 
 QP::QP(server_cqs cqs, int connfd)
 {
-  recv_cq = cqs.recv_cq;
-  send_cq = cqs.send_cq;
+  recv_cq = cqs.recv;
+  send_cq = cqs.send;
   own_cqs = false;
 
   setup_common(cqs.srq, connfd);
@@ -262,20 +270,82 @@ void QP::setup_common(ibv_srq *srq, int connfd)
 
 QP::~QP()
 {
-  if (qp)
+  if (qp) {
     if (ibv_destroy_qp(qp)) {
       perror("ibv_destroy_qp");
       FAIL("ibv_destroy_qp");
     }
+    qp = NULL;
+  }
 
   if (own_cqs) {
     if (send_cq)
       ibv_destroy_cq(send_cq);
 
-    if (recv_cq && recv_cq != send_cq)
+    if (recv_cq && recv_cq != send_cq) 
       ibv_destroy_cq(recv_cq);
+  }
+
+  send_cq = NULL;
+  recv_cq = NULL;
+}
+
+void QP::send_imm_inline(uint32_t tag, void *buf, unsigned len)
+{
+  if (len > max_inline_data) {
+    FAIL("above max inline size " << len << " > " << max_inline_data);
+  }
+
+  struct ibv_sge list = {
+    .addr	  = (uint64_t) buf,
+    .length = (uint32_t) len,
+  };
+
+  struct ibv_send_wr *bad_wr;
+
+  struct ibv_send_wr wr = {
+    .sg_list = &list,
+    .num_sge = !!len,
+    .opcode = IBV_WR_SEND_WITH_IMM,
+    .send_flags = IBV_SEND_INLINE | IBV_SEND_SIGNALED,
+    .imm_data = tag,
+  };
+
+  int err = ibv_post_send(qp, &wr, &bad_wr);
+  if (err == ENOMEM) {
+    // Send queue is full (probably)
+    FAIL("send queue full");
+  } else if (err) {
+    FAIL("Failed to ibv_post_send: " << strerror(err));
   }
 }
 
+uint32_t QP::wait_op(ibv_wc_opcode op)
+{
+  ibv_wc wc;
+  int n;
+
+  ibv_cq *cq = send_cq;
+  if (op & IBV_WC_RECV)
+    cq = recv_cq;
+
+  do {
+    n = ibv_poll_cq(cq, 1, &wc);
+  } while (n == 0);
+
+  if (n < 0) {
+    FAIL("ibv_poll_cq failed");
+  }
+
+  if (wc.status != IBV_WC_SUCCESS) {
+    FAIL("unsuccessful status " << wc.status << " (vendor_err " << wc.vendor_err << ")");
+  }
+
+  if (wc.opcode != op) {
+    FAIL("expected opcode " << op << " but got opcode " << wc.opcode);
+  }
+
+  return wc.byte_len;
+}
 
 } // namespace buddy::rdma

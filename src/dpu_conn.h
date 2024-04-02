@@ -7,13 +7,14 @@ namespace buddy::host {
 class DpuConn {
 
   public:
-    DpuConn();
+    DpuConn() = default;
     DpuConn(int world_rank, int world_size);
     ~DpuConn();
 
+    rdma::QP qp = {};
+
   private:
-    bool initialized;
-    rdma::QP qp;
+    bool initialized = false;
 };
 
 } // namespace buddy::host
