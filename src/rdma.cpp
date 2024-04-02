@@ -1,0 +1,281 @@
+#include <stdio.h>
+#include <unistd.h>
+#include "rdma.h"
+#include "util.h"
+#include "sockets.h"
+
+#define IB_PORT 1
+#define GID_INDEX 0
+#define COUNT 1000
+#define MTU IBV_MTU_4096
+
+namespace buddy::rdma {
+
+Context context;
+
+void init()
+{
+  context.init();
+}
+
+Context::~Context()
+{
+    if (pd) {
+        ibv_dealloc_pd(pd);
+        pd = NULL;
+    }
+
+    if (ctx) {
+        ibv_close_device(ctx);
+        ctx = NULL;
+    }
+}
+
+void Context::init()
+{
+  struct ibv_device **dev_list;
+
+  srand48(getpid() * time(NULL));
+
+  // Get an IB devices list:
+  dev_list = ibv_get_device_list(NULL);
+  if (!dev_list)
+  {
+      perror("Failed to get IB devices list.");
+      FAIL("ib setup failed");
+  }
+
+  // Get an IB device:
+  if (!*dev_list)
+  {
+      perror("No IB devices found.");
+      FAIL("ib setup failed");
+  }
+
+  // Select last device (dpu specifc hack)
+  while (dev_list[1])
+      dev_list++;
+
+  printf("using ib device %s\n", ibv_get_device_name(*dev_list));
+
+  // Open an IB device context:
+  ctx = ibv_open_device(*dev_list);
+  if (!ctx)
+  {
+    fprintf(stderr, "Couldn't get context for %s.\n", ibv_get_device_name(*dev_list));
+    FAIL("ib setup failed");
+  }
+
+  // Allocate a Protection Domain:
+  pd = ibv_alloc_pd(ctx);
+  if (!pd)
+  {
+    perror("Failed to allocate Protection Domain.");
+    FAIL("ib setup failed");
+  }
+
+  // Query IB port attribute
+  memset(&port_info, 0, sizeof(port_info));
+  if(ibv_query_port(ctx, IB_PORT, &port_info))
+  {
+    perror("Failed to query IB port information.");
+    FAIL("ib setup failed");
+  }
+
+  union ibv_gid gid;
+  memset(&gid, 0, sizeof(gid));
+  if (ibv_query_gid(ctx, IB_PORT, GID_INDEX, &gid)) {
+    perror("Failed to query GID");
+    FAIL("ib setup failed");
+  }
+
+  // Query Device attribute
+  struct ibv_device_attr device_attr;
+  if (ibv_query_device(ctx, &device_attr))
+  {
+      perror("Failed to query IB device information.");
+      FAIL("ib setup failed");
+  }
+  /*else{
+      printf("The maximum number of QP = %d\n", device_attr.max_qp);
+      printf("Largest contiguous block that can be registered %llu\n", device_attr.max_mr_size);
+      printf("Maximum number of outstanding WR = %d\n", device_attr.max_qp_wr);
+  }*/
+
+  local_dest_template = {};
+
+  // Get LID:
+  local_dest_template.lid = port_info.lid;
+  if ( port_info.link_layer == IBV_LINK_LAYER_INFINIBAND && !local_dest_template.lid)
+  {
+      perror("Couldn't get LID.");
+      FAIL("ib setup failed");
+  }
+
+  // Set PSN:
+  local_dest_template.psn = lrand48() & 0xffffff;
+
+  memcpy(&local_dest_template.gid.raw, &gid.raw, sizeof(gid.raw));
+}
+
+server_cqs::server_cqs()
+{
+  ibv_srq_init_attr srq_attr = {
+    .attr = {
+      .max_wr = COUNT,
+      .max_sge = 1,
+    },
+  };
+
+  srq = ibv_create_srq(context.get_pd(), &srq_attr);
+  if (!srq) {
+    perror("ibv_create_srq");
+    FAIL("failed to create srq");
+  }
+
+  send_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+  recv_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+}
+
+QP::QP(int connfd)
+{
+  send_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+  recv_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+  own_cqs = true;
+
+  if (!send_cq || ! recv_cq) {
+    perror("Couldn't create Completion Queue.");
+    FAIL("qp setup failed");
+  }
+
+  setup_common(NULL, connfd);
+}
+
+QP::QP(server_cqs cqs, int connfd)
+{
+  recv_cq = cqs.recv_cq;
+  send_cq = cqs.send_cq;
+  own_cqs = false;
+
+  setup_common(cqs.srq, connfd);
+}
+
+void QP::setup_common(ibv_srq *srq, int connfd)
+{
+  // Creates a Queue Pair:
+  {
+    struct ibv_qp_init_attr qp_init_attr = {
+            .send_cq = send_cq,
+            .recv_cq = recv_cq,
+            .srq = srq,
+            .cap = {
+                    .max_send_wr = COUNT,
+                    .max_recv_wr = COUNT,
+                    .max_send_sge = 1,
+                    .max_recv_sge = 1,
+            },
+            .qp_type = IBV_QPT_RC,
+    };
+
+    qp = ibv_create_qp(context.get_pd(), &qp_init_attr);
+    if (!qp) {
+        perror("Couldn't create Queue Pair.");
+        FAIL("qp setup failed");
+    }
+
+    struct ibv_qp_attr qp_attr;
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    qp_attr.qp_state        = IBV_QPS_INIT;
+    qp_attr.pkey_index      = 0;
+    qp_attr.port_num        = IB_PORT;
+    qp_attr.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+
+    if (ibv_modify_qp(qp, &qp_attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)) {
+        perror("Failed to modify QP to INIT.");
+        FAIL("ib setup failed");
+    }
+    
+    ibv_query_qp(qp, &qp_attr, IBV_QP_CAP, &qp_init_attr);
+    max_inline_data = qp_init_attr.cap.max_inline_data;
+    //printf("The maximum inline data = %d\n", max_inline_data);
+  }
+
+  IBDest local_dest = *context.get_local_dest_template();
+  IBDest remote_dest = {};
+
+  // Get QPN:
+  local_dest.qpn = qp->qp_num;
+
+  // Exchange IBDest values
+  if (srq) {
+    full_read(connfd, (char *)&remote_dest, sizeof(remote_dest));
+    full_write(connfd, (char *)&local_dest, sizeof(local_dest));
+  } else {
+    full_write(connfd, (char *)&local_dest, sizeof(local_dest));
+    full_read(connfd, (char *)&remote_dest, sizeof(remote_dest));
+  }
+
+  struct ibv_qp_attr qp_attr;
+  memset(&qp_attr, 0, sizeof(qp_attr));
+  qp_attr.qp_state		= IBV_QPS_RTR;
+  qp_attr.path_mtu		= MTU;
+  qp_attr.dest_qp_num	= remote_dest.qpn;
+  qp_attr.rq_psn			= remote_dest.psn;
+  qp_attr.max_dest_rd_atomic	= 1;
+  qp_attr.min_rnr_timer		    = 12;
+
+#if 0
+  qp_attr.ah_attr.is_global	  = 0;
+#else
+  qp_attr.ah_attr.is_global	  = 1;
+  memcpy(qp_attr.ah_attr.grh.dgid.raw, remote_dest.gid.raw, sizeof(remote_dest.gid.raw));
+  qp_attr.ah_attr.grh.sgid_index = GID_INDEX;
+  qp_attr.ah_attr.grh.hop_limit = 255;
+  qp_attr.ah_attr.grh.traffic_class = 0;
+#endif
+
+  qp_attr.ah_attr.dlid  = remote_dest.lid;
+  qp_attr.ah_attr.sl		= 0;
+  qp_attr.ah_attr.src_path_bits	= 0;
+  qp_attr.ah_attr.port_num	= IB_PORT;
+
+
+  if (ibv_modify_qp(qp, &qp_attr, IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
+                                  IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER | IBV_QP_AV)) {
+      perror("Failed to modify QP to RTR.");
+      FAIL("qp setup failed.");
+  }
+
+  qp_attr.qp_state	    = IBV_QPS_RTS;
+  qp_attr.timeout	      = 14;
+  qp_attr.retry_cnt	    = 7;
+  qp_attr.rnr_retry	    = 7;
+  qp_attr.sq_psn	      = local_dest.psn;
+  qp_attr.max_rd_atomic = 1;
+  if (ibv_modify_qp(qp, &qp_attr, IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
+                                  IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC))
+  {
+      perror("Failed to modify QP to RTS.\n");
+      FAIL("qp setup failed.");
+  }
+}
+
+QP::~QP()
+{
+  if (qp)
+    if (ibv_destroy_qp(qp)) {
+      perror("ibv_destroy_qp");
+      FAIL("ibv_destroy_qp");
+    }
+
+  if (own_cqs) {
+    if (send_cq)
+      ibv_destroy_cq(send_cq);
+
+    if (recv_cq && recv_cq != send_cq)
+      ibv_destroy_cq(recv_cq);
+  }
+}
+
+
+} // namespace buddy::rdma

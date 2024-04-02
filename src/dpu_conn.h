@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rdma.h"
+
 namespace buddy::host {
 
 class DpuConn {
@@ -11,6 +13,7 @@ class DpuConn {
 
   private:
     bool initialized;
+    rdma::QP qp;
 };
 
 } // namespace buddy::host
