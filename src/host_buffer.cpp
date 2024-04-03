@@ -73,8 +73,12 @@ void flush()
   dpu_conn.qp.wait_op(IBV_WC_SEND);
 
   uint32_t rlen = dpu_conn.qp.wait_op(IBV_WC_RECV);
-  char *str = (char *)recv_mr->addr;
-  str[rlen] = 0;
+  CHECK(rlen == sizeof(uint64_t));
+
+  uint64_t *dmalen = (uint64_t *)recv_mr->addr;
+  std::cout << "Got msg from dpu " <<
+    " dmalen = " << *dmalen << std::endl;
+  char *str = dma_buf->buf;
   std::cout << "got: " << str << std::endl;
 
   if (send_bytes == 0)

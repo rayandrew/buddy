@@ -148,8 +148,10 @@ Engine::Engine(unsigned num_clients, int *socks)
 struct jobdata {
   uint32_t client;
   uint32_t offset:31;
-  uint32_t dir:31;
+  uint32_t dir:1;
 };
+
+static_assert(sizeof(jobdata) == sizeof(doca_data));
 
 static doca_data encode_user_data(unsigned client, uint32_t offset, direction dir)
 {

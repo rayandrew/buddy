@@ -133,7 +133,16 @@ void Proxy::rdma_loop()
             std::cout << "dma message: " << buf << std::endl;
 
             char str[] = "hejsan!";
-            qps[client_idx].send_imm_inline(0, str, sizeof(str));
+            memcpy(buf, str, sizeof(str));
+            dma_engine->transfer(client_idx, 0, sizeof(str), dma::D2H);
+
+            while (!dma_engine->poll(&cl, &offset, &dir));
+            CHECK(cl == client_idx);
+            CHECK(offset == 0);
+            CHECK(dir == dma::D2H);
+
+            uint64_t msg = sizeof(str);
+            qps[client_idx].send_imm_inline(0, (char*)&msg, sizeof(msg));
 
             break;
           }
