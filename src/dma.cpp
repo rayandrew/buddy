@@ -94,6 +94,7 @@ Engine::Engine(unsigned num_clients, int *socks)
     CHECK(bds[i].len == buflen);
 
   local_buf = new char[num_clients * buflen];
+  remote_addr = new char*[num_clients];
 
   doca_dma *dma_ctx;
   CHECK_DOCA(doca_dma_create(&dma_ctx));
@@ -136,6 +137,7 @@ Engine::Engine(unsigned num_clients, int *socks)
 
     CHECK_DOCA(doca_buf_inventory_buf_by_addr(buf_inv, remote_map[i],
           bds[i].addr, buflen, &doca_buf_remote[i]));
+    remote_addr[i] = (char *)bds[i].addr;
   }
 
   delete[] bds;
@@ -143,30 +145,43 @@ Engine::Engine(unsigned num_clients, int *socks)
   std::cout << "ok" << std::endl;
 }
 
-const uint64_t D2H_BIT = 1UL << 63;
+struct jobdata {
+  uint32_t client;
+  uint32_t offset:31;
+  uint32_t dir:31;
+};
 
-static doca_data encode_user_data(unsigned client, direction dir)
+static doca_data encode_user_data(unsigned client, uint32_t offset, direction dir)
 {
-  assert(client < D2H_BIT);
-  uint64_t data = client;
-  if (dir == D2H)
-    data |= D2H_BIT;
-  doca_data dd = { .u64 = data };
+  jobdata jd = { .client = client, .offset = offset, .dir = dir };
+
+  assert(jd.client == client);
+  assert(jd.offset == offset);
+  assert(jd.dir == dir);
+
+  uint64_t *ptr = reinterpret_cast<uint64_t*>(&jd);
+  doca_data dd = { .u64 = *ptr };
   return dd;
 }
 
-static void decode_user_data(doca_data data, unsigned *client, direction *dir)
+static void decode_user_data(doca_data data, unsigned *client, uint32_t *offset, direction *dir)
 {
-  *client = data.u64 & (~D2H_BIT);
+  jobdata *jd = reinterpret_cast<jobdata*>(&data.u64);
 
-  if (data.u64 & D2H_BIT)
-    *dir = D2H;
-  else
-    *dir = H2D;
+  *client = jd->client;
+  *offset = jd->offset;
+  *dir = (direction)jd->dir;
 }
 
-void Engine::transfer(unsigned client, size_t len, direction dir)
+void Engine::transfer(unsigned client, uint32_t offset, size_t len, direction dir)
 {
+  assert(client < num_clients);
+  assert(len <= buflen);
+  assert(offset < buflen);
+
+  CHECK_DOCA(doca_buf_set_data(doca_buf_local[client], local_buf + client*buflen + offset, len));
+  CHECK_DOCA(doca_buf_set_data(doca_buf_remote[client], remote_addr[client] + offset, len));
+
   doca_buf *src_buf, *dst_buf;
   if (dir == H2D) {
     src_buf = doca_buf_remote[client];
@@ -176,10 +191,6 @@ void Engine::transfer(unsigned client, size_t len, direction dir)
     dst_buf = doca_buf_remote[client];
   }
 
-  void *src_addr = NULL;
-  CHECK_DOCA(doca_buf_get_data(src_buf, &src_addr));
-  CHECK_DOCA(doca_buf_set_data(src_buf, src_addr, len));
-
   CHECK_DOCA(doca_buf_reset_data_len(dst_buf));
 
   doca_dma_job_memcpy dma_job = {
@@ -187,7 +198,7 @@ void Engine::transfer(unsigned client, size_t len, direction dir)
       .type = DOCA_DMA_JOB_MEMCPY,
       .flags = DOCA_JOB_FLAGS_NONE,
       .ctx = ctx,
-      .user_data = encode_user_data(client, dir),
+      .user_data = encode_user_data(client, offset, dir),
     },
     .dst_buff = dst_buf,
     .src_buff = src_buf,
@@ -196,7 +207,7 @@ void Engine::transfer(unsigned client, size_t len, direction dir)
   CHECK_DOCA(doca_workq_submit(workq, &dma_job.base));
 }
 
-bool Engine::poll(unsigned *client, direction *dir)
+bool Engine::poll(unsigned *client, uint32_t *offset, direction *dir)
 {
   doca_event event = {0};
   doca_error_t result;
@@ -210,8 +221,9 @@ bool Engine::poll(unsigned *client, direction *dir)
   CHECK_DOCA(result);
   CHECK_DOCA((doca_error_t)event.result.u64);
 
-  decode_user_data(event.user_data, client, dir);
+  decode_user_data(event.user_data, client, offset, dir);
   assert(*client < num_clients);
+  assert(*offset < buflen);
   assert(*dir == H2D || *dir == D2H);
 
   return true;

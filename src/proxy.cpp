@@ -114,21 +114,26 @@ void Proxy::rdma_loop()
             CHECK(msglen == sizeof(uint64_t));
             uint64_t *dmalen = (uint64_t *)recv_buf;
             std::cout << "Got msg from client " << client_idx << 
-              "dmalen = " << *dmalen << std::endl;
+              " dmalen = " << *dmalen << std::endl;
 
-            dma_engine->transfer(client_idx, *dmalen, dma::H2D);
+            dma_engine->transfer(client_idx, 0, *dmalen, dma::H2D);
             std::cout << "initiated dma" << std::endl;
 
             unsigned cl;
+            uint32_t offset;
             dma::direction dir;
-            while (!dma_engine->poll(&cl, &dir));
+            while (!dma_engine->poll(&cl, &offset, &dir));
 
             CHECK(cl == client_idx);
+            CHECK(offset == 0);
             CHECK(dir == dma::H2D);
 
             char *buf = dma_engine->client_buf(client_idx);
             buf[*dmalen] = 0;
             std::cout << "dma message: " << buf << std::endl;
+
+            char str[] = "hejsan!";
+            qps[client_idx].send_imm_inline(0, str, sizeof(str));
 
             break;
           }
@@ -156,30 +161,30 @@ void Proxy::rdma_loop()
 
 void Proxy::post_recv(uint64_t wr_id)
 {
-    assert(wr_id >= 0);
-    assert(wr_id < PROXY_RX_DEPTH);
+  assert(wr_id >= 0);
+  assert(wr_id < PROXY_RX_DEPTH);
 
-    uint64_t offset = wr_id * PROXY_BUF_SIZE;
-    uint64_t buffer = (uint64_t) mr->addr;
+  uint64_t offset = wr_id * PROXY_BUF_SIZE;
+  uint64_t buffer = (uint64_t) mr->addr;
 
-    struct ibv_sge list = {
-      .addr = buffer + offset,
-      .length = PROXY_BUF_SIZE,
-      .lkey	= mr->lkey
-    };
+  struct ibv_sge list = {
+    .addr = buffer + offset,
+    .length = PROXY_BUF_SIZE,
+    .lkey	= mr->lkey
+  };
 
-    struct ibv_recv_wr *bad_wr;
-    struct ibv_recv_wr wr = {
-      .wr_id = wr_id,
-      .next       = NULL,
-      .sg_list    = &list,
-      .num_sge    = 1,
-    };
+  struct ibv_recv_wr *bad_wr;
+  struct ibv_recv_wr wr = {
+    .wr_id = wr_id,
+    .next       = NULL,
+    .sg_list    = &list,
+    .num_sge    = 1,
+  };
 
-    if (ibv_post_srq_recv(cqs.srq, &wr, &bad_wr)) {
-      perror("ibv_post_recv");
-      FAIL("failed to post recv");
-    }
+  if (ibv_post_srq_recv(cqs.srq, &wr, &bad_wr)) {
+    perror("ibv_post_recv");
+    FAIL("failed to post recv");
   }
+}
 
 } // namespace buddy::dpu

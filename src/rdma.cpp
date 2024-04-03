@@ -151,7 +151,7 @@ QP::QP(int connfd)
   recv_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
   own_cqs = true;
 
-  if (!send_cq || ! recv_cq) {
+  if (!send_cq || !recv_cq) {
     perror("Couldn't create Completion Queue.");
     FAIL("qp setup failed");
   }
@@ -346,6 +346,25 @@ uint32_t QP::wait_op(ibv_wc_opcode op)
   }
 
   return wc.byte_len;
+}
+
+void QP::recv(ibv_mr *mr, unsigned len)
+{
+  ibv_sge list = {
+    .addr = (uint64_t) mr->addr,
+    .length = (uint32_t) len,
+    .lkey = mr->lkey,
+  };
+
+  ibv_recv_wr wr = {
+    .sg_list = &list,
+    .num_sge = 1,
+  };
+
+  ibv_recv_wr *bad_wr;
+  if (ibv_post_recv(qp, &wr, &bad_wr)) {
+    FAIL("Failed to ibv_post_recv");
+  }
 }
 
 } // namespace buddy::rdma

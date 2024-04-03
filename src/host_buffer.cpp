@@ -22,6 +22,8 @@ int world_size;
 DpuConn dpu_conn;
 dma::Buffer *dma_buf;
 
+ibv_mr *recv_mr;
+
 void init()
 {
   rdma::init();
@@ -32,12 +34,19 @@ void init()
   recv_buf = (char *)malloc(RECV_BUFFER_SIZE);
   recv_bytes = 0;
 
+  char *rdma_recv_buf = new char[RECV_BUFFER_SIZE];
+  recv_mr = ibv_reg_mr(rdma::Context::get().get_pd(), rdma_recv_buf, RECV_BUFFER_SIZE, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+  CHECK(recv_mr);
+
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
   CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
 
   dma_buf = new dma::Buffer(SEND_BUFFER_SIZE);
 
   new (&dpu_conn) DpuConn(world_rank, world_size, dma_buf);
+
+  dpu_conn.qp.recv(recv_mr, RECV_BUFFER_SIZE);
+
 }
 
 void put_send(request_head head, const void *buf)
@@ -57,17 +66,20 @@ void put_send(request_head head, const void *buf)
 
 void flush()
 {
+  char hej[] = "hej!!";
+  memcpy(dma_buf->buf, hej, sizeof(hej));
+  size_t len = sizeof(hej);
+  dpu_conn.qp.send_imm_inline(0, (char *)&len, sizeof(len));
+  dpu_conn.qp.wait_op(IBV_WC_SEND);
+
+  uint32_t rlen = dpu_conn.qp.wait_op(IBV_WC_RECV);
+  char *str = (char *)recv_mr->addr;
+  str[rlen] = 0;
+  std::cout << "got: " << str << std::endl;
+
   if (send_bytes == 0)
     return;
 
-  char hej[] = "hej!!";
-  memcpy(dma_buf->buf, hej, sizeof(hej));
-  std::cout << "send..." << std::endl;
-  size_t len = sizeof(hej);
-  dpu_conn.qp.send_imm_inline(0, (char *)&len, sizeof(len));
-  std::cout << "wait..." << std::endl;
-  dpu_conn.qp.wait_op(IBV_WC_SEND);
-  std::cout << "done!" << std::endl;
 
   MPI_Send(&send_bytes, 1, MPI_UNSIGNED_LONG, !world_rank, 0, MPI_COMM_WORLD);
   MPI_Send(send_buf, send_bytes, MPI_BYTE, !world_rank, 0, MPI_COMM_WORLD);

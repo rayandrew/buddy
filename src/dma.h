@@ -29,8 +29,8 @@ enum direction { H2D, D2H };
 class Engine {
   public:
     Engine(unsigned num_clients, int *socks);
-    void transfer(unsigned client, size_t len, direction dir);
-    bool poll(unsigned *client, direction *dir);
+    void transfer(unsigned client, uint32_t offset, size_t len, direction dir);
+    bool poll(unsigned *client, uint32_t *offset, direction *dir);
 
     char *client_buf(unsigned client)
     {
@@ -41,6 +41,7 @@ class Engine {
     unsigned num_clients;
     size_t buflen;
     char *local_buf;
+    char **remote_addr;
 
     doca_dev *dev;
     doca_ctx *ctx;
