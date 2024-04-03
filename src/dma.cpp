@@ -1,3 +1,4 @@
+#include <cassert>
 #include <doca_dev.h>
 #include <doca_dma.h>
 #include <doca_mmap.h>
@@ -18,7 +19,7 @@ struct buffer_desc {
     size_t export_desc_len;
 };
 
-struct doca_dev *open_device(const char *pci_addr)
+static struct doca_dev *open_device(const char *pci_addr)
 {
   struct doca_devinfo **dev_list;
   uint32_t nb_devs;
@@ -140,6 +141,80 @@ Engine::Engine(unsigned num_clients, int *socks)
   delete[] bds;
 
   std::cout << "ok" << std::endl;
+}
+
+const uint64_t D2H_BIT = 1UL << 63;
+
+static doca_data encode_user_data(unsigned client, direction dir)
+{
+  assert(client < D2H_BIT);
+  uint64_t data = client;
+  if (dir == D2H)
+    data |= D2H_BIT;
+  doca_data dd = { .u64 = data };
+  return dd;
+}
+
+static void decode_user_data(doca_data data, unsigned *client, direction *dir)
+{
+  *client = data.u64 & (~D2H_BIT);
+
+  if (data.u64 & D2H_BIT)
+    *dir = D2H;
+  else
+    *dir = H2D;
+}
+
+void Engine::transfer(unsigned client, size_t len, direction dir)
+{
+  doca_buf *src_buf, *dst_buf;
+  if (dir == H2D) {
+    src_buf = doca_buf_remote[client];
+    dst_buf = doca_buf_local[client];
+  } else {
+    src_buf = doca_buf_local[client];
+    dst_buf = doca_buf_remote[client];
+  }
+
+  void *src_addr = NULL;
+  CHECK_DOCA(doca_buf_get_data(src_buf, &src_addr));
+  CHECK_DOCA(doca_buf_set_data(src_buf, src_addr, len));
+
+  CHECK_DOCA(doca_buf_reset_data_len(dst_buf));
+
+  doca_dma_job_memcpy dma_job = {
+    .base = {
+      .type = DOCA_DMA_JOB_MEMCPY,
+      .flags = DOCA_JOB_FLAGS_NONE,
+      .ctx = ctx,
+      .user_data = encode_user_data(client, dir),
+    },
+    .dst_buff = dst_buf,
+    .src_buff = src_buf,
+  };
+
+  CHECK_DOCA(doca_workq_submit(workq, &dma_job.base));
+}
+
+bool Engine::poll(unsigned *client, direction *dir)
+{
+  doca_event event = {0};
+  doca_error_t result;
+  result = doca_workq_progress_retrieve(workq, &event, DOCA_WORKQ_RETRIEVE_FLAGS_NONE);
+  
+  if (result == DOCA_ERROR_AGAIN) {
+    return false;
+  }/* else if(result == DOCA_ERROR_IO_FAILED) {
+    result = (doca_error_t)event.result.u64;
+  }*/
+  CHECK_DOCA(result);
+  CHECK_DOCA((doca_error_t)event.result.u64);
+
+  decode_user_data(event.user_data, client, dir);
+  assert(*client < num_clients);
+  assert(*dir == H2D || *dir == D2H);
+
+  return true;
 }
 
 } // namespace buddy::dma

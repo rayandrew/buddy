@@ -60,9 +60,11 @@ void flush()
   if (send_bytes == 0)
     return;
 
-  char hej[] = "hej";
+  char hej[] = "hej!!";
+  memcpy(dma_buf->buf, hej, sizeof(hej));
   std::cout << "send..." << std::endl;
-  dpu_conn.qp.send_imm_inline(0, hej, sizeof(hej));
+  size_t len = sizeof(hej);
+  dpu_conn.qp.send_imm_inline(0, (char *)&len, sizeof(len));
   std::cout << "wait..." << std::endl;
   dpu_conn.qp.wait_op(IBV_WC_SEND);
   std::cout << "done!" << std::endl;

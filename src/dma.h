@@ -24,11 +24,18 @@ class Buffer {
     doca_mmap *dmap;
 };
 
+enum direction { H2D, D2H };
+
 class Engine {
   public:
     Engine(unsigned num_clients, int *socks);
-    void transfer(unsigned client, size_t len);
-    bool poll(unsigned *client);
+    void transfer(unsigned client, size_t len, direction dir);
+    bool poll(unsigned *client, direction *dir);
+
+    char *client_buf(unsigned client)
+    {
+      return local_buf + client*buflen;
+    }
 
   private:
     unsigned num_clients;

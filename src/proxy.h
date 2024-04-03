@@ -52,7 +52,6 @@ class Proxy {
     std::condition_variable workq_cv;
     int workq_submitted = 0;
 
-    void init_doca();
     void post_recv(uint64_t wr_id);
 
     void harvest_wcs();

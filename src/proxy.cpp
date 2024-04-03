@@ -31,98 +31,11 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
     FAIL("failed to reg mr");
   }
 
-  //init_doca();
-
   for (unsigned i = 0; i < num_clients; i++)
     qp_num_to_idx[qps[i].get_qp()->qp_num] = i;
 
   for (uint64_t wr_id = 0; wr_id < PROXY_RX_DEPTH; wr_id++) {
     post_recv(wr_id);
-  }
-}
-
-void Proxy::init_doca()
-{
-  struct doca_devinfo **dev_list;
-  uint32_t nb_devs;
-
-  if (doca_devinfo_list_create(&dev_list, &nb_devs) != DOCA_SUCCESS)
-    FAIL("doca_devinfo_list_create");
-
-  const char *pci_addr = "03:00.0";
-
-  uint32_t dev_idx;
-  for (dev_idx = 0; dev_idx < nb_devs; dev_idx++) {
-    /*
-        char pci[DOCA_DEVINFO_PCI_ADDR_SIZE+1] = {};
-        if (doca_devinfo_get_pci_addr_str(dev_list[dev_idx], pci) != DOCA_SUCCESS)
-        FAIL("doca_devinfo_get_pci_addr_str");
-        */
-
-    uint8_t is_addr_equal = 0;
-    if (doca_devinfo_get_is_pci_addr_equal(dev_list[dev_idx], pci_addr, &is_addr_equal) != DOCA_SUCCESS)
-      FAIL("doca_devinfo_get_is_pci_addr_equal");
-
-    // TODO change to dma
-    //doca_error_t support = doca_compress_job_get_supported(dev_list[dev_idx], DOCA_DECOMPRESS_DEFLATE_JOB);
-    doca_error_t support = DOCA_SUCCESS;
-
-    //printf("%s\t%d\t%d\n", pci, (int)is_addr_equal, support==DOCA_SUCCESS);
-
-    if (is_addr_equal && support == DOCA_SUCCESS)
-      break;
-  }
-
-  if (dev_idx == nb_devs)
-    FAIL("could not find suitable doca device!");
-
-  doca_dev *dev = NULL;
-  if (doca_dev_open(dev_list[dev_idx], &dev) != DOCA_SUCCESS)
-    FAIL("doca_dev_open");
-
-  doca_devinfo_list_destroy(dev_list);
-
-  if (doca_ctx_dev_add(doca_context, dev) != DOCA_SUCCESS)
-    FAIL("doca_ctx_dev_add");
-
-  if (doca_ctx_start(doca_context) != DOCA_SUCCESS)
-    FAIL("doca_ctx_start");
-
-  if (doca_workq_create(2*PROXY_RX_DEPTH, &workq) != DOCA_SUCCESS)
-    FAIL("doca_workq_create");
-
-  if (doca_ctx_workq_add(doca_context, workq) != DOCA_SUCCESS)
-    FAIL("doca_workq_add");
-
-  if (doca_mmap_create(NULL, &buf_mmap) != DOCA_SUCCESS)
-    FAIL("doca_mmap_create");
-
-  if (doca_mmap_dev_add(buf_mmap, dev) != DOCA_SUCCESS)
-    FAIL("doca_mmap_dev_add");
-
-  if (doca_mmap_set_memrange(buf_mmap, mr->addr, mr->length) != DOCA_SUCCESS)
-    FAIL("doca_mmap_set_memrange");
-
-  if (doca_mmap_start(buf_mmap) != DOCA_SUCCESS)
-    FAIL("doca_mmap_start");
-
-  if (doca_buf_inventory_create(NULL, 2*PROXY_RX_DEPTH, DOCA_BUF_EXTENSION_NONE, &buf_inv) != DOCA_SUCCESS)
-    FAIL("doca_buf_inventory_create");
-
-  if (doca_buf_inventory_start(buf_inv) != DOCA_SUCCESS)
-    FAIL("doca_buf_inventory_start");
-
-  recv_buf_doca = (doca_buf **)malloc(sizeof(*recv_buf_doca) * PROXY_RX_DEPTH);
-  extra_buf_doca = (doca_buf **)malloc(sizeof(*extra_buf_doca) * PROXY_RX_DEPTH);
-
-  for (uint64_t wr_id = 0; wr_id < PROXY_RX_DEPTH; wr_id++) {
-    char *recv_buf = (char *)mr->addr + wr_id * PROXY_BUF_SIZE;
-    char *extra_buf = (char *)mr->addr + (PROXY_RX_DEPTH + wr_id) * PROXY_BUF_SIZE;
-
-    if (doca_buf_inventory_buf_by_addr(buf_inv, buf_mmap, recv_buf, PROXY_BUF_SIZE, &recv_buf_doca[wr_id]) != DOCA_SUCCESS)
-      FAIL("doca_buf_inventory_buf_by_addr");
-    if (doca_buf_inventory_buf_by_addr(buf_inv, buf_mmap, extra_buf, PROXY_BUF_SIZE, &extra_buf_doca[wr_id]) != DOCA_SUCCESS)
-      FAIL("doca_buf_inventory_buf_by_addr");
   }
 }
 
@@ -188,13 +101,35 @@ void Proxy::rdma_loop()
       CHECK(wc[i].opcode == IBV_WC_RECV);
       CHECK(wc[i].wc_flags & IBV_WC_WITH_IMM);
 
-      int client_idx = qp_num_to_idx[wc[i].qp_num];
+      unsigned client_idx = qp_num_to_idx[wc[i].qp_num];
       uint32_t imm_tag = wc[i].imm_data;
+
+      uint64_t wr_id = wc[i].wr_id;
+      char *recv_buf = (char *)mr->addr + wr_id * PROXY_BUF_SIZE;
+      size_t msglen = wc[i].byte_len;
 
       switch (imm_tag) {
         case 0:
           {
-            std::cout << "Got msg from client " << client_idx << std::endl;
+            CHECK(msglen == sizeof(uint64_t));
+            uint64_t *dmalen = (uint64_t *)recv_buf;
+            std::cout << "Got msg from client " << client_idx << 
+              "dmalen = " << *dmalen << std::endl;
+
+            dma_engine->transfer(client_idx, *dmalen, dma::H2D);
+            std::cout << "initiated dma" << std::endl;
+
+            unsigned cl;
+            dma::direction dir;
+            while (!dma_engine->poll(&cl, &dir));
+
+            CHECK(cl == client_idx);
+            CHECK(dir == dma::H2D);
+
+            char *buf = dma_engine->client_buf(client_idx);
+            buf[*dmalen] = 0;
+            std::cout << "dma message: " << buf << std::endl;
+
             break;
           }
 
