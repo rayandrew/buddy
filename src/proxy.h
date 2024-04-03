@@ -6,6 +6,7 @@
 #include <atomic>
 
 #include "rdma.h"
+#include "dma.h"
 
 #define PROXY_RX_DEPTH 128
 #define PROXY_BUF_SIZE 2097152UL
@@ -23,7 +24,8 @@ struct ProxyConfig {
 
 class Proxy {
   public:
-    Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients, rdma::QP *qps);
+    Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
+        rdma::QP *qps, dma::Engine *dma_engine);
     ~Proxy();
     void rdma_loop();
 
@@ -32,6 +34,7 @@ class Proxy {
     rdma::server_cqs cqs;
     const unsigned num_clients;
     rdma::QP *qps;
+    dma::Engine *dma_engine;
 
     ibv_mr *mr;
     std::unordered_map<unsigned, unsigned> qp_num_to_idx;
@@ -53,7 +56,6 @@ class Proxy {
     void post_recv(uint64_t wr_id);
 
     void harvest_wcs();
-    int handle_responses();
 
     friend void *run_harvest_thread(void *arg);
 };

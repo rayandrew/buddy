@@ -8,7 +8,7 @@
 
 namespace buddy::host {
 
-DpuConn::DpuConn(int world_rank, int world_size)
+DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf)
   : initialized(true)
 {
   char *host = getenv("BUDDY_DPU");
@@ -23,6 +23,8 @@ DpuConn::DpuConn(int world_rank, int world_size)
   full_write(sock, (char *)&msg, sizeof(msg));
 
   new (&qp) rdma::QP(sock);
+
+  dma_buf->send(sock);
 
   close(sock);
 }

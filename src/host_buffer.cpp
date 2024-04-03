@@ -6,6 +6,7 @@
 #include "dpu_conn.h"
 #include "util.h"
 #include "rdma.h"
+#include "dma.h"
 
 namespace buddy::host {
 
@@ -19,6 +20,7 @@ int world_rank;
 int world_size;
 
 DpuConn dpu_conn;
+dma::Buffer *dma_buf;
 
 void init()
 {
@@ -33,7 +35,9 @@ void init()
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
   CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
 
-  dpu_conn = DpuConn(world_rank, world_size);
+  dma_buf = new dma::Buffer(SEND_BUFFER_SIZE);
+
+  new (&dpu_conn) DpuConn(world_rank, world_size, dma_buf);
 }
 
 void put_send(request_head head, const void *buf)

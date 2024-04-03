@@ -13,11 +13,13 @@ namespace buddy::dpu {
 Proxy::~Proxy()
 {}
 
-Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients, rdma::QP *qps)
+Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
+    rdma::QP *qps, dma::Engine *dma_engine)
   : config(config)
   , cqs(cqs)
   , num_clients(num_clients)
   , qps(qps)
+  , dma_engine(dma_engine)
   , quit(false)
 {
   size_t total_size = PROXY_BUF_SIZE * PROXY_RX_DEPTH;
