@@ -13,6 +13,9 @@
 /* Message size: BUDDY_MAX_MESSAGE, and bypass to mpi on larger. */
 
 static_assert(std::is_pointer<MPI_Request>());
+static_assert(sizeof(buddy::host::recv_handle) == sizeof(void *));
+
+int world_rank;
 
 int MPI_Init(int *argc, char ***argv)
 {
@@ -21,6 +24,7 @@ int MPI_Init(int *argc, char ***argv)
     real_MPI_Init = (int(*)(int *argc, char ***argv)) dlsym(RTLD_NEXT, "MPI_Init");
 
   CHECK_MPI(real_MPI_Init(argc, argv));
+  CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
 
   buddy::host::init();
 
@@ -54,12 +58,17 @@ int MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source, int tag,
   CHECK(source != MPI_ANY_SOURCE);
   CHECK(tag != MPI_ANY_TAG);
 
-  auto req = new buddy::host::request();
-  req->head.size = ds*count;
-  req->head.rank = source;
-  req->head.tag = tag;
-  req->buf = buf;
-  *mpi_req = reinterpret_cast<MPI_Request>(req);
+  buddy::request_head head = {
+    .size = (size_t)ds*count,
+    .src = source,
+    .dst = world_rank,
+    .tag = tag,
+  };
+  auto handle = buddy::host::put_recv(head, buf);
+
+  // Evil hack to cast handle (ie iterator) to MPI_Request (ie pointer)
+  auto handle_ptr = &handle;
+  *mpi_req = *((MPI_Request*)handle_ptr);
 
   return 0;
 }
@@ -77,31 +86,34 @@ int MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int t
 
   buddy::request_head head = {
     .size = (size_t)ds*count,
-    .rank = dest,
+    .src = world_rank,
+    .dst = dest,
     .tag = tag,
   };
   buddy::host::put_send(head, buf);
 
-  auto req_ptr = reinterpret_cast<buddy::host::request**>(mpi_req);
-  *req_ptr = nullptr;
+  *mpi_req = MPI_REQUEST_NULL;
 
   return 0;
 }
 
 int MPI_Wait(MPI_Request *mpi_req, MPI_Status *status)
 {
-  auto req_ptr = reinterpret_cast<buddy::host::request**>(mpi_req);
-
   CHECK(status == MPI_STATUS_IGNORE);
 
-  if (*req_ptr == nullptr)
+  if (*mpi_req == MPI_REQUEST_NULL)
     return 0;
 
-  while (!buddy::host::try_recv((*req_ptr)->head, (*req_ptr)->buf))
-    buddy::host::flush();
+  auto handle = *reinterpret_cast<buddy::host::recv_handle*>(mpi_req);
 
-  delete *req_ptr;
-  *req_ptr = nullptr;
+  // dst field indicates if request is completed
+  while (handle->head.dst == world_rank)
+    while (!buddy::host::poll_recv())
+      buddy::host::flush();
+
+  buddy::host::delete_recv(handle);
+
+  *mpi_req = MPI_REQUEST_NULL;
 
   return 0;
 }

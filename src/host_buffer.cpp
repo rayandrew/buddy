@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstring>
 #include <mpi.h>
+#include <absl/container/flat_hash_map.h>
 #include "host_buffer.h"
 #include "dpu_conn.h"
 #include "util.h"
@@ -23,6 +24,8 @@ DpuConn dpu_conn;
 dma::Buffer *dma_buf;
 
 ibv_mr *recv_mr;
+
+absl::flat_hash_map<recv_key, std::list<request>> recv_map;
 
 void init()
 {
@@ -91,37 +94,92 @@ void flush()
   send_bytes = 0;
 }
 
-bool try_recv(request_head head, void *buf)
+static bool try_recv(request_head *head, void *data)
 {
-  size_t size = sizeof(head) + head.size;
+  auto it = recv_map.find({head->src, head->tag});
+  if (it == recv_map.end())
+    return false;
+
+  auto& list = it->second;
+  assert(list.size());
+
+  for (auto& req: list) {
+    if (req.head.dst != world_rank)
+      continue;
+
+    CHECK(req.head.size <= head->size);
+    memcpy(req.buf, data, head->size);
+    req.head.dst = !world_rank;
+
+    return true;
+  }
+
+  return false;
+}
+
+bool poll_recv()
+{
+  // Possible optimization: "merge" contiguous processed requests to reduce
+  // number of hops in subsequent parses of the same buffer by increasing the
+  // size of the first one.
   size_t pos = 0;
+  unsigned processed = 0;
+  unsigned unprocessed = 0;
 
   if (recv_bytes == 0) {
     MPI_Recv(&recv_bytes, 1, MPI_UNSIGNED_LONG, !world_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     MPI_Recv(recv_buf, recv_bytes, MPI_BYTE, !world_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
   }
 
-  while (pos + size <= recv_bytes) {
+  while (pos + sizeof(request_head) <= recv_bytes) {
     request_head *pos_head = reinterpret_cast<request_head*>(recv_buf+pos);
 
-    if (pos_head->rank == world_rank) {
-      if (pos_head->tag == head.tag) {
-        CHECK(pos_head->size <= head.size);
+    // Already completed
+    if (pos_head->dst != world_rank)
+      continue;
 
-        void *data = reinterpret_cast<void*>(pos_head+1);
-        memcpy(buf, data, pos_head->size);
-
-        // Mark request as processed
-        pos_head->rank = !world_rank;
-
-        return true;
-      }
+    void *data = reinterpret_cast<void*>(pos_head+1);
+    if (try_recv(pos_head, data)) {
+      pos_head->dst = !world_rank;
+      processed++;
+    } else {
+      unprocessed++;
     }
 
-    pos += sizeof(head) + pos_head->size;
+    pos += sizeof(request_head) + pos_head->size;
+  }
+  assert(pos == recv_bytes);
+
+  if (!unprocessed) {
+    std::cout << "emptied recv buffer" << std::endl;
+    recv_bytes = 0;
   }
 
-  return false;
+  return processed > 0;
+}
+
+recv_handle put_recv(request_head head, void *buf)
+{
+  recv_key key = {head.src, head.tag};
+  auto it = recv_map.try_emplace(key);
+  auto& list = it.first->second;
+
+  request req = { .head = head, .buf = buf};
+  list.push_back(req);
+
+  return --list.end();
+}
+
+void delete_recv(recv_handle handle)
+{
+  auto list_it = recv_map.find({handle->head.src, handle->head.tag});
+  assert(list_it != recv_map.end());
+  auto& list = list_it->second;
+
+  list.erase(handle);
+
+  if (list.empty())
+    recv_map.erase(list_it);
 }
 
 } // namespace buddy::host
