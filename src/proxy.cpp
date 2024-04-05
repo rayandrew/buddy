@@ -87,6 +87,8 @@ void Proxy::rdma_loop()
   if (pthread_create(&harvest_thread, NULL, run_harvest_thread, this) < 0)
     FAIL("failed to create thread");
 
+  unsigned quit_counter = 0;
+
   while (!quit) {
     ibv_wc wc[rx_depth];
 
@@ -115,7 +117,9 @@ void Proxy::rdma_loop()
       switch (imm_tag) {
         case IMM_QUIT:
           {
-            quit = true;
+            quit_counter++;
+            if (quit_counter == num_clients)
+              quit = true;
             break;
           }
         case IMM_DMA_SEND_BUF:
@@ -135,10 +139,13 @@ void Proxy::rdma_loop()
             CHECK(offset == DMA_OFFSET_SEND);
             CHECK(dir == dma::H2D);
 
+            // Ack
             qps[client_idx].write_imm(IMM_DMA_SEND_BUF);
 
-            // todo: routing
             char *src_buf = dma_engine->client_buf(client_idx) + DMA_OFFSET_SEND;
+            //route_msgs(src_buf, dmalen);
+
+            // todo: routing
             char *dst_buf = dma_engine->client_buf(!client_idx) + DMA_OFFSET_RECV;
 
             memcpy(dst_buf, src_buf, dmalen);

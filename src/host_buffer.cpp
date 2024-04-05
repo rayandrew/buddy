@@ -15,8 +15,7 @@ namespace buddy::host {
 char *send_buf;
 size_t send_bytes;
 
-char *recv_buf;
-size_t recv_bytes;
+ReqBufRead recv_buf;
 
 int world_rank;
 int world_size;
@@ -33,7 +32,6 @@ void init()
   rdma::init();
 
   send_bytes = 0;
-  recv_bytes = 0;
 
   char *rdma_recv_buf = new char[RDMA_SIZE];
   recv_mr = ibv_reg_mr(rdma::Context::get().get_pd(), rdma_recv_buf, RDMA_SIZE,
@@ -46,7 +44,7 @@ void init()
   dma_buf = new dma::Buffer(DMA_SIZE_TOTAL);
 
   send_buf = dma_buf->buf + DMA_OFFSET_SEND;
-  recv_buf = dma_buf->buf + DMA_OFFSET_RECV;
+  recv_buf = ReqBufRead(dma_buf->buf + DMA_OFFSET_RECV, 0, world_rank);
 
   dpu_conn = new DpuConn(world_rank, world_size, dma_buf);
 
@@ -104,7 +102,7 @@ void flush()
   send_bytes = 0;
 }
 
-static bool try_recv(request_head *head, void *data)
+static bool try_recv(request_head *head, char *data)
 {
   auto it = recv_map.find({head->src, head->tag});
   if (it == recv_map.end())
@@ -129,11 +127,10 @@ static bool try_recv(request_head *head, void *data)
 
 bool poll_recv()
 {
-  size_t pos = 0;
   unsigned processed = 0;
   unsigned unprocessed = 0;
 
-  if (recv_bytes == 0) {
+  if (recv_buf.empty()) {
     /*
     dpu_conn->qp.write_imm(IMM_DMA_RECV_BUF, NULL, NULL, 0, 0, 0, 0);
     dpu_conn->qp.wait_send(&wc);
@@ -145,36 +142,27 @@ bool poll_recv()
       CHECK(wc.opcode == IBV_WC_RECV);
       CHECK(wc.byte_len == sizeof(*size));
       CHECK(wc.imm_data == IMM_DMA_RECV_BUF);
-      recv_bytes = *size;
+      recv_buf.reset_len(*size);
 
       dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
     }
   }
 
-  // Possible optimization: "merge" contiguous processed requests to reduce
-  // number of hops in subsequent parses of the same buffer by increasing the
-  // size of the first one.
-  while (pos + sizeof(request_head) <= recv_bytes) {
-    request_head *pos_head = reinterpret_cast<request_head*>(recv_buf+pos);
-
-    // Already completed
-    if (pos_head->dst != world_rank)
-      continue;
-
-    void *data = reinterpret_cast<void*>(pos_head+1);
-    if (try_recv(pos_head, data)) {
-      pos_head->dst = !world_rank;
+  request_head *head;
+  char *data;
+  while (recv_buf.next(&head, &data)) {
+    if (try_recv(head, data)) {
+      head->dst = !world_rank;
       processed++;
     } else {
       unprocessed++;
     }
-
-    pos += sizeof(request_head) + pos_head->size;
   }
-  assert(pos == recv_bytes);
 
-  if (!unprocessed)
-    recv_bytes = 0;
+  if (unprocessed)
+    recv_buf.reset_pos();
+  else
+    recv_buf.reset_len(0);
 
   return processed > 0;
 }

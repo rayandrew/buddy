@@ -2,17 +2,7 @@
 
 #include <cstddef>
 #include <list>
-
-namespace buddy {
-
-struct request_head {
-  size_t size;
-  int src;
-  int dst;
-  int tag;
-};
-
-} // namespace buddy
+#include "request.h"
 
 namespace buddy::host {
 
