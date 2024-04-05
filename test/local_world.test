@@ -1,0 +1,1 @@
+mpirun -np 16 $BUILD/bin/around-the-world_buddy 1000 100

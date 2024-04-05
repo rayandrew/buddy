@@ -1,0 +1,14 @@
+#!/bin/bash -e
+
+: ${1?}
+: ${BUDDY_DPU?}
+: ${DPU_BUILD?}
+: ${BUILD?}
+
+ssh "$BUDDY_DPU" bash -c '"while pkill buddy-proxy; do :; done"'
+ssh "$BUDDY_DPU" "$DPU_BUILD/bin/buddy-proxy" & ssh_pid=$!
+sleep 1
+
+bash -xe "$1"
+
+wait $ssh_pid
