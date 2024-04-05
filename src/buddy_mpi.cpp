@@ -93,7 +93,7 @@ int MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int t
     .dst = dest,
     .tag = tag,
   };
-  buddy::host::put_send(head, buf);
+  buddy::host::put_send(head, (const char *)buf);
 
   *mpi_req = MPI_REQUEST_NULL;
 

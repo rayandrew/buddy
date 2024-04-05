@@ -213,7 +213,7 @@ void Proxy::post_recv(uint64_t wr_id)
 
 void Proxy::route_reqs(char *buf, size_t len)
 {
-  ReqBufRead reader(buf, len, -1);
+  ReqBufRead reader(buf, len);
 
   request_head *head;
   char *data;

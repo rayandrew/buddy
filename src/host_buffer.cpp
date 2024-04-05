@@ -12,9 +12,7 @@
 
 namespace buddy::host {
 
-char *send_buf;
-size_t send_bytes;
-
+ReqBufWrite send_buf;
 ReqBufRead recv_buf;
 
 int world_rank;
@@ -31,8 +29,6 @@ void init()
 {
   rdma::init();
 
-  send_bytes = 0;
-
   char *rdma_recv_buf = new char[RDMA_SIZE];
   recv_mr = ibv_reg_mr(rdma::Context::get().get_pd(), rdma_recv_buf, RDMA_SIZE,
       IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
@@ -43,8 +39,8 @@ void init()
 
   dma_buf = new dma::Buffer(DMA_SIZE_TOTAL);
 
-  send_buf = dma_buf->buf + DMA_OFFSET_SEND;
-  recv_buf = ReqBufRead(dma_buf->buf + DMA_OFFSET_RECV, 0, world_rank);
+  send_buf = ReqBufWrite(dma_buf->buf + DMA_OFFSET_SEND, DMA_SIZE_SEND);
+  recv_buf = ReqBufRead(dma_buf->buf + DMA_OFFSET_RECV, 0);
 
   dpu_conn = new DpuConn(world_rank, world_size, dma_buf);
 
@@ -64,34 +60,24 @@ void finalize()
   delete[] addr;
 }
 
-void put_send(request_head head, const void *buf)
+void put_send(request_head head, const char *data)
 {
-  size_t put_size = sizeof(head) + head.size;
-  assert(put_size <= DMA_SIZE_SEND);
-
-  if (send_bytes + put_size > DMA_SIZE_SEND) {
+  while (!send_buf.append(head, data))
     flush();
-    assert(send_bytes == 0);
-  }
-
-  memcpy(send_buf+send_bytes, &head, sizeof(head));
-  memcpy(send_buf+send_bytes+sizeof(head), buf, head.size);
-
-  send_bytes += put_size;
 }
 
 void flush()
 {
-  if (send_bytes == 0)
+  if (send_buf.empty())
     return;
 
-  uint64_t size = send_bytes;
+  uint64_t size = send_buf.get_pos();
   dpu_conn->qp.send_imm_inline(IMM_DMA_SEND_BUF, (char *)&size, sizeof(size));
   ibv_wc wc;
   dpu_conn->qp.wait_send(&wc);
 
   // Wait for DPU to finish transfer
-  // Possible optimization: don't block here
+  // Possible optimization: don't block here?
   dpu_conn->qp.wait_recv(&wc);
   CHECK(wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM);
   CHECK(wc.byte_len == 0);
@@ -99,7 +85,7 @@ void flush()
 
   dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
 
-  send_bytes = 0;
+  send_buf.reset_pos();
 }
 
 static bool try_recv(request_head *head, char *data)

@@ -32,7 +32,7 @@ typedef std::list<request>::iterator recv_handle;
 void init();
 void finalize();
 void flush();
-void put_send(request_head head, const void *buf);
+void put_send(request_head head, const char *data);
 recv_handle put_recv(request_head head, void *buf);
 bool poll_recv();
 void delete_recv(recv_handle req_it);

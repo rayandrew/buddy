@@ -19,7 +19,7 @@ class ReqBufRead {
       , pos(0)
     {}
 
-    ReqBufRead(char *buf, size_t len, int dst)
+    ReqBufRead(char *buf, size_t len)
       : buf(buf)
       , len(len)
       , pos(0)
