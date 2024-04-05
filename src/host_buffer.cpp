@@ -172,10 +172,8 @@ bool poll_recv()
   }
   assert(pos == recv_bytes);
 
-  if (recv_bytes && !unprocessed) {
-    std::cout << "emptied recv buffer" << std::endl;
+  if (!unprocessed)
     recv_bytes = 0;
-  }
 
   return processed > 0;
 }

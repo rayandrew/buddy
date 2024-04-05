@@ -61,11 +61,13 @@ void Context::init()
       FAIL("ib setup failed");
   }
 
+  /*
   // Select last device (dpu specifc hack)
   while (dev_list[1])
       dev_list++;
+  */
 
-  printf("using ib device %s\n", ibv_get_device_name(*dev_list));
+  //printf("using ib device %s\n", ibv_get_device_name(*dev_list));
 
   // Open an IB device context:
   ctx = ibv_open_device(*dev_list);
