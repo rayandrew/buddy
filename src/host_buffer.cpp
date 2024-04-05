@@ -145,12 +145,14 @@ bool poll_recv()
       recv_buf.reset_len(*size);
 
       dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
+    } else {
+      return false;
     }
   }
 
   request_head *head;
   char *data;
-  while (recv_buf.next(&head, &data)) {
+  while (recv_buf.next(&head, &data, world_rank)) {
     if (try_recv(head, data)) {
       head->dst = !world_rank;
       processed++;

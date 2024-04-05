@@ -1,10 +1,4 @@
 #include <cassert>
-#include <doca_buf.h>
-#include <doca_buf_inventory.h>
-#include <doca_ctx.h>
-#include <doca_error.h>
-#include <doca_log.h>
-
 #include "proxy.h"
 #include "util.h"
 #include "local_proto.h"
@@ -19,7 +13,7 @@ Proxy::~Proxy()
 }
 
 Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
-    rdma::QP *qps, dma::Engine *dma_engine)
+    rdma::QP *qps, dma::Engine *dma_engine, int *ranks)
   : config(config)
   , cqs(cqs)
   , num_clients(num_clients)
@@ -40,8 +34,18 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   for (unsigned i = 0; i < num_clients; i++)
     qp_num_to_idx[qps[i].get_qp()->qp_num] = i;
 
+  for (unsigned i = 0; i < num_clients; i++)
+    rank_to_idx[ranks[i]] = i;
+  delete[] ranks;
+
   for (uint64_t wr_id = 0; wr_id < rx_depth; wr_id++) {
     post_recv(wr_id);
+  }
+
+  recv_bufs = new ReqBufWrite[num_clients];
+  for (unsigned i = 0; i < num_clients; i++) {
+    char *buf = dma_engine->client_buf(i) + DMA_OFFSET_RECV;
+    new (&recv_bufs[i]) ReqBufWrite(buf, DMA_SIZE_RECV);
   }
 }
 
@@ -125,7 +129,9 @@ void Proxy::rdma_loop()
         case IMM_DMA_SEND_BUF:
           {
             CHECK(msglen == sizeof(uint64_t));
+
             uint64_t dmalen = *((uint64_t *)recv_buf);
+            assert(dmalen > 0);
 
             dma_engine->transfer(client_idx, DMA_OFFSET_SEND, dmalen, dma::H2D);
 
@@ -142,21 +148,10 @@ void Proxy::rdma_loop()
             // Ack
             qps[client_idx].write_imm(IMM_DMA_SEND_BUF);
 
+            // Optimization: async
             char *src_buf = dma_engine->client_buf(client_idx) + DMA_OFFSET_SEND;
-            //route_msgs(src_buf, dmalen);
-
-            // todo: routing
-            char *dst_buf = dma_engine->client_buf(!client_idx) + DMA_OFFSET_RECV;
-
-            memcpy(dst_buf, src_buf, dmalen);
-            dma_engine->transfer(!client_idx, DMA_OFFSET_RECV, dmalen, dma::D2H);
-
-            while (!dma_engine->poll(&cl, &offset, &dir));
-            CHECK(cl == !client_idx);
-            CHECK(offset == DMA_OFFSET_RECV);
-            CHECK(dir == dma::D2H);
-
-            qps[!client_idx].send_imm_inline(IMM_DMA_RECV_BUF, (char*)&dmalen, sizeof(dmalen));
+            route_reqs(src_buf, dmalen);
+            flush_dma();
 
             break;
           }
@@ -213,6 +208,44 @@ void Proxy::post_recv(uint64_t wr_id)
   if (ibv_post_srq_recv(cqs.srq, &wr, &bad_wr)) {
     perror("ibv_post_recv");
     FAIL("failed to post recv");
+  }
+}
+
+void Proxy::route_reqs(char *buf, size_t len)
+{
+  ReqBufRead reader(buf, len, -1);
+
+  request_head *head;
+  char *data;
+  while (reader.next(&head, &data, -1)) {
+    unsigned dst_client = rank_to_idx[head->dst];
+    // Optimization: unnecessary to flush all buffers here
+    // Also, could be async?
+    while (!recv_bufs[dst_client].append(*head, data))
+      flush_dma();
+  }
+}
+
+void Proxy::flush_dma()
+{
+  // Optimization: queue up all transfers at once
+  for (unsigned i = 0; i < num_clients; i++) {
+    if (recv_bufs[i].empty())
+      continue;
+
+    uint64_t size = recv_bufs[i].get_pos();
+    dma_engine->transfer(i, DMA_OFFSET_RECV, size, dma::D2H);
+
+    unsigned cl;
+    uint32_t offset;
+    dma::direction dir;
+    while (!dma_engine->poll(&cl, &offset, &dir));
+    CHECK(cl == i);
+    CHECK(offset == DMA_OFFSET_RECV);
+    CHECK(dir == dma::D2H);
+
+    qps[i].send_imm_inline(IMM_DMA_RECV_BUF, (char*)&size, sizeof(size));
+    recv_bufs[i].reset_pos();
   }
 }
 

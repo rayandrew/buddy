@@ -17,6 +17,7 @@ int main(int argc, char **argv)
   int world_size = 0;
   int conn_count = 0;
   int *conn_list = NULL;
+  int *ranks = NULL;
 
   do {
     int conn = accept(lsock, NULL, NULL);
@@ -32,13 +33,16 @@ int main(int argc, char **argv)
       world_size = msg.world_size;
       std::cout << "world size = " << msg.world_size << std::endl;
       conn_list = new int[world_size];
+      ranks = new int[world_size];
     } else
       CHECK(world_size == msg.world_size);
 
     CHECK(msg.world_rank < world_size);
 
+    conn_list[conn_count] = conn;
+    ranks[conn_count] = msg.world_rank;
+
     conn_count++;
-    conn_list[msg.world_rank] = conn;
   } while (conn_count < world_size);
 
   close(lsock);
@@ -53,7 +57,7 @@ int main(int argc, char **argv)
 
   buddy::dpu::ProxyConfig config;
 
-  buddy::dpu::Proxy proxy(config, cqs, conn_count, qps, &dma_engine);
+  buddy::dpu::Proxy proxy(config, cqs, conn_count, qps, &dma_engine, ranks);
   proxy.rdma_loop();
 
   delete[] qps;
