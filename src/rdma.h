@@ -59,6 +59,7 @@ class QP {
     void post_rdma_recv();
     void wait_send(ibv_wc *wc);
     void wait_recv(ibv_wc *wc);
+    bool poll_recv(ibv_wc *wc);
 
     ibv_qp *get_qp() { return qp; }
     ibv_cq *get_recv_cq() { return recv_cq; }
@@ -72,7 +73,8 @@ class QP {
     bool own_cqs = false;
 
     void setup_common(ibv_srq *srq, int connfd);
-    void wait_op(ibv_wc *wc, ibv_cq *cq);
+    void wait_cq(ibv_wc *wc, ibv_cq *cq);
+    bool poll_cq(ibv_wc *wc, ibv_cq *cq);
 };
 
 void init();

@@ -323,7 +323,7 @@ void QP::send_imm_inline(uint32_t tag, void *buf, unsigned len)
   }
 }
 
-void QP::wait_op(ibv_wc *wc, ibv_cq *cq)
+void QP::wait_cq(ibv_wc *wc, ibv_cq *cq)
 {
   int n;
   do {
@@ -338,14 +338,39 @@ void QP::wait_op(ibv_wc *wc, ibv_cq *cq)
 
 void QP::wait_send(ibv_wc *wc)
 {
-  wait_op(wc, send_cq);
+  wait_cq(wc, send_cq);
   CHECK(!(wc->opcode & IBV_WC_RECV));
 }
 
 void QP::wait_recv(ibv_wc *wc)
 {
-  wait_op(wc, recv_cq);
+  wait_cq(wc, recv_cq);
   CHECK(wc->opcode & IBV_WC_RECV);
+}
+
+bool QP::poll_cq(ibv_wc *wc, ibv_cq *cq)
+{
+  int n = ibv_poll_cq(cq, 1, wc);
+  CHECK(n >= 0);
+
+  if (n == 1) {
+    if (wc->status != IBV_WC_SUCCESS) {
+      FAIL("unsuccessful status " << wc->status << " (vendor_err " << wc->vendor_err << ")");
+    }
+    return true;
+  } else {
+    return false;
+  }
+}
+
+bool QP::poll_recv(ibv_wc *wc)
+{
+  if (poll_cq(wc, recv_cq)) {
+    CHECK(wc->opcode & IBV_WC_RECV);
+    return true;
+  } else {
+    return false;
+  }
 }
 
 void QP::recv(ibv_mr *mr, unsigned len)

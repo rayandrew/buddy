@@ -134,20 +134,21 @@ bool poll_recv()
   unsigned unprocessed = 0;
 
   if (recv_bytes == 0) {
+    /*
     dpu_conn->qp.write_imm(IMM_DMA_RECV_BUF, NULL, NULL, 0, 0, 0, 0);
-    ibv_wc wc;
     dpu_conn->qp.wait_send(&wc);
+    */
 
-    // Wait for DPU to finish transfer
-    // Possible optimization: don't block here
-    uint64_t *size = (uint64_t *)recv_mr->addr;
-    dpu_conn->qp.wait_recv(&wc);
-    CHECK(wc.opcode == IBV_WC_RECV);
-    CHECK(wc.byte_len == sizeof(*size));
-    CHECK(wc.imm_data == IMM_DMA_RECV_BUF);
-    recv_bytes = *size;
+    ibv_wc wc;
+    if (dpu_conn->qp.poll_recv(&wc)) {
+      uint64_t *size = (uint64_t *)recv_mr->addr;
+      CHECK(wc.opcode == IBV_WC_RECV);
+      CHECK(wc.byte_len == sizeof(*size));
+      CHECK(wc.imm_data == IMM_DMA_RECV_BUF);
+      recv_bytes = *size;
 
-    dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
+      dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
+    }
   }
 
   // Possible optimization: "merge" contiguous processed requests to reduce
