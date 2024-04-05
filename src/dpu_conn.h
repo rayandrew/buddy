@@ -8,14 +8,9 @@ namespace buddy::host {
 class DpuConn {
 
   public:
-    DpuConn() = default;
     DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf);
     ~DpuConn();
-
-    rdma::QP qp = {};
-
-  private:
-    bool initialized = false;
+    rdma::QP qp;
 };
 
 } // namespace buddy::host

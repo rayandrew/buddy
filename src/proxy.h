@@ -8,7 +8,6 @@
 #include "rdma.h"
 #include "dma.h"
 
-#define PROXY_RX_DEPTH 128
 #define PROXY_BUF_SIZE 2097152UL
 
 struct doca_ctx;
@@ -35,10 +34,11 @@ class Proxy {
     const unsigned num_clients;
     rdma::QP *qps;
     dma::Engine *dma_engine;
+    std::atomic_bool quit;
+    const size_t rx_depth;
 
     ibv_mr *mr;
     std::unordered_map<unsigned, unsigned> qp_num_to_idx;
-    std::atomic_bool quit;
 
     doca_ctx *doca_context;
     doca_workq *workq;

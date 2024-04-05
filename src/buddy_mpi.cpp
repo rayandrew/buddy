@@ -38,6 +38,9 @@ int MPI_Finalize()
     real_MPI_Finalize = (int(*)()) dlsym(RTLD_NEXT, "MPI_Finalize");
 
   buddy::host::flush();
+  
+  MPI_Barrier(MPI_COMM_WORLD);
+  buddy::host::finalize();
 
   CHECK_MPI(real_MPI_Finalize());
 

@@ -9,7 +9,6 @@
 namespace buddy::host {
 
 DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf)
-  : initialized(true)
 {
   char *host = getenv("BUDDY_DPU");
   CHECK(host && *host);
@@ -31,10 +30,10 @@ DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf)
 
 DpuConn::~DpuConn()
 {
-  if (!initialized)
-    return;
-  initialized = false;
-  qp = {};
+  qp.write_imm(IMM_QUIT);
+  ibv_wc wc;
+  qp.wait_send(&wc);
+  CHECK(wc.opcode == IBV_WC_RDMA_WRITE);
 }
 
 } // namespace buddy::host

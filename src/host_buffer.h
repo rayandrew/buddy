@@ -16,9 +16,6 @@ struct request_head {
 
 namespace buddy::host {
 
-const size_t SEND_BUFFER_SIZE = 4096;
-const size_t RECV_BUFFER_SIZE = 4096;
-
 struct request {
   request_head head;
   void *buf;
@@ -43,6 +40,7 @@ struct recv_key {
 typedef std::list<request>::iterator recv_handle;
 
 void init();
+void finalize();
 void flush();
 void put_send(request_head head, const void *buf);
 recv_handle put_recv(request_head head, void *buf);

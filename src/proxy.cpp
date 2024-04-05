@@ -7,11 +7,16 @@
 
 #include "proxy.h"
 #include "util.h"
+#include "local_proto.h"
 
 namespace buddy::dpu {
 
 Proxy::~Proxy()
-{}
+{
+  char *buffer = (char *)mr->addr;
+  CHECK(!ibv_dereg_mr(mr));
+  delete[] buffer;
+}
 
 Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
     rdma::QP *qps, dma::Engine *dma_engine)
@@ -21,9 +26,10 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   , qps(qps)
   , dma_engine(dma_engine)
   , quit(false)
+  , rx_depth(2*num_clients)
 {
-  size_t total_size = PROXY_BUF_SIZE * PROXY_RX_DEPTH;
-  char *buffer = (char *)malloc(total_size);
+  size_t total_size = PROXY_BUF_SIZE * rx_depth;
+  char *buffer = new char[total_size];
 
   mr = ibv_reg_mr(rdma::Context::get().get_pd(), buffer, total_size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
   if (!mr) {
@@ -34,7 +40,7 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   for (unsigned i = 0; i < num_clients; i++)
     qp_num_to_idx[qps[i].get_qp()->qp_num] = i;
 
-  for (uint64_t wr_id = 0; wr_id < PROXY_RX_DEPTH; wr_id++) {
+  for (uint64_t wr_id = 0; wr_id < rx_depth; wr_id++) {
     post_recv(wr_id);
   }
 }
@@ -43,11 +49,11 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
 void Proxy::harvest_wcs()
 {
   while (!quit) {
-    ibv_wc wc[PROXY_RX_DEPTH];
+    ibv_wc wc[rx_depth];
     int n;
 
     do {
-      n = ibv_poll_cq(cqs.send, PROXY_RX_DEPTH, wc);
+      n = ibv_poll_cq(cqs.send, rx_depth, wc);
     } while (n == 0 && !quit);
 
     if (n < 0) {
@@ -76,19 +82,17 @@ void Proxy::rdma_loop()
 {
   pthread_t harvest_thread;
 
-  uint64_t *hist_reqs = (uint64_t*)calloc(PROXY_RX_DEPTH, sizeof(uint64_t));
+  uint64_t *hist_reqs = (uint64_t*)calloc(rx_depth, sizeof(uint64_t));
 
   if (pthread_create(&harvest_thread, NULL, run_harvest_thread, this) < 0)
     FAIL("failed to create thread");
 
   while (!quit) {
-    ibv_wc wc[PROXY_RX_DEPTH];
-
-    std::cout << "poll..." << std::endl;
+    ibv_wc wc[rx_depth];
 
     int n;
     do {
-      n = ibv_poll_cq(cqs.recv, PROXY_RX_DEPTH, wc);
+      n = ibv_poll_cq(cqs.recv, rx_depth, wc);
     } while (n == 0 && !quit);
 
     CHECK(n >= 0);
@@ -98,7 +102,7 @@ void Proxy::rdma_loop()
 
     for (int i = 0; i < n; i++) {
       CHECK(wc[i].status == IBV_WC_SUCCESS);
-      CHECK(wc[i].opcode == IBV_WC_RECV);
+      CHECK(wc[i].opcode == IBV_WC_RECV || wc[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM);
       CHECK(wc[i].wc_flags & IBV_WC_WITH_IMM);
 
       unsigned client_idx = qp_num_to_idx[wc[i].qp_num];
@@ -109,46 +113,55 @@ void Proxy::rdma_loop()
       size_t msglen = wc[i].byte_len;
 
       switch (imm_tag) {
-        case 0:
+        case IMM_QUIT:
+          {
+            quit = true;
+            break;
+          }
+        case IMM_DMA_SEND_BUF:
           {
             CHECK(msglen == sizeof(uint64_t));
-            uint64_t *dmalen = (uint64_t *)recv_buf;
-            std::cout << "Got msg from client " << client_idx << 
-              " dmalen = " << *dmalen << std::endl;
+            uint64_t dmalen = *((uint64_t *)recv_buf);
 
-            dma_engine->transfer(client_idx, 0, *dmalen, dma::H2D);
-            std::cout << "initiated dma" << std::endl;
+            dma_engine->transfer(client_idx, DMA_OFFSET_SEND, dmalen, dma::H2D);
 
+            // Optimization: do this in another thread
             unsigned cl;
             uint32_t offset;
             dma::direction dir;
             while (!dma_engine->poll(&cl, &offset, &dir));
 
             CHECK(cl == client_idx);
-            CHECK(offset == 0);
+            CHECK(offset == DMA_OFFSET_SEND);
             CHECK(dir == dma::H2D);
 
-            char *buf = dma_engine->client_buf(client_idx);
-            buf[*dmalen] = 0;
-            std::cout << "dma message: " << buf << std::endl;
+            qps[client_idx].write_imm(IMM_DMA_SEND_BUF);
 
-            char str[] = "hejsan!";
-            memcpy(buf, str, sizeof(str));
-            dma_engine->transfer(client_idx, 0, sizeof(str), dma::D2H);
+            // todo: routing
+            char *src_buf = dma_engine->client_buf(client_idx) + DMA_OFFSET_SEND;
+            char *dst_buf = dma_engine->client_buf(!client_idx) + DMA_OFFSET_RECV;
+
+            memcpy(dst_buf, src_buf, dmalen);
+            dma_engine->transfer(!client_idx, DMA_OFFSET_RECV, dmalen, dma::D2H);
 
             while (!dma_engine->poll(&cl, &offset, &dir));
-            CHECK(cl == client_idx);
-            CHECK(offset == 0);
+            CHECK(cl == !client_idx);
+            CHECK(offset == DMA_OFFSET_RECV);
             CHECK(dir == dma::D2H);
 
-            uint64_t msg = sizeof(str);
-            qps[client_idx].send_imm_inline(0, (char*)&msg, sizeof(msg));
+            qps[!client_idx].send_imm_inline(IMM_DMA_RECV_BUF, (char*)&dmalen, sizeof(dmalen));
 
             break;
           }
 
+        case IMM_DMA_RECV_BUF:
+          {
+            // todo
+            break;
+          }
+
         default:
-          FAIL("unknown imm_tag for recv ");
+          FAIL("unknown imm_tag for recv " << imm_tag);
           break;
       }
 
@@ -157,7 +170,7 @@ void Proxy::rdma_loop()
   }
 
   printf("hist_reqs = [");
-  for (uint64_t i = 0; i < PROXY_RX_DEPTH; i++) {
+  for (uint64_t i = 0; i < rx_depth; i++) {
     printf("%lu,", hist_reqs[i]);
   }
   printf("]\n");
@@ -171,7 +184,7 @@ void Proxy::rdma_loop()
 void Proxy::post_recv(uint64_t wr_id)
 {
   assert(wr_id >= 0);
-  assert(wr_id < PROXY_RX_DEPTH);
+  assert(wr_id < rx_depth);
 
   uint64_t offset = wr_id * PROXY_BUF_SIZE;
   uint64_t buffer = (uint64_t) mr->addr;

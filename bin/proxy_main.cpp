@@ -46,9 +46,8 @@ int main(int argc, char **argv)
   buddy::rdma::server_cqs cqs;
   auto qps = new buddy::rdma::QP[conn_count];
 
-  for (int i = 0; i < conn_count; i++) {
+  for (int i = 0; i < conn_count; i++)
     new (&qps[i]) buddy::rdma::QP(cqs, conn_list[i]);
-  }
 
   buddy::dma::Engine dma_engine(conn_count, conn_list);
 
@@ -56,4 +55,6 @@ int main(int argc, char **argv)
 
   buddy::dpu::Proxy proxy(config, cqs, conn_count, qps, &dma_engine);
   proxy.rdma_loop();
+
+  delete[] qps;
 }

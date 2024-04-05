@@ -8,6 +8,7 @@
 #include "util.h"
 #include "rdma.h"
 #include "dma.h"
+#include "local_proto.h"
 
 namespace buddy::host {
 
@@ -20,7 +21,7 @@ size_t recv_bytes;
 int world_rank;
 int world_size;
 
-DpuConn dpu_conn;
+DpuConn *dpu_conn;
 dma::Buffer *dma_buf;
 
 ibv_mr *recv_mr;
@@ -31,34 +32,48 @@ void init()
 {
   rdma::init();
 
-  send_buf = (char *)malloc(SEND_BUFFER_SIZE);
   send_bytes = 0;
-
-  recv_buf = (char *)malloc(RECV_BUFFER_SIZE);
   recv_bytes = 0;
 
-  char *rdma_recv_buf = new char[RECV_BUFFER_SIZE];
-  recv_mr = ibv_reg_mr(rdma::Context::get().get_pd(), rdma_recv_buf, RECV_BUFFER_SIZE, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+  char *rdma_recv_buf = new char[RDMA_SIZE];
+  recv_mr = ibv_reg_mr(rdma::Context::get().get_pd(), rdma_recv_buf, RDMA_SIZE,
+      IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
   CHECK(recv_mr);
 
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
   CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
 
-  dma_buf = new dma::Buffer(SEND_BUFFER_SIZE);
+  dma_buf = new dma::Buffer(DMA_SIZE_TOTAL);
 
-  new (&dpu_conn) DpuConn(world_rank, world_size, dma_buf);
+  send_buf = dma_buf->buf + DMA_OFFSET_SEND;
+  recv_buf = dma_buf->buf + DMA_OFFSET_RECV;
 
-  dpu_conn.qp.recv(recv_mr, RECV_BUFFER_SIZE);
+  dpu_conn = new DpuConn(world_rank, world_size, dma_buf);
 
+  dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
+}
+
+void finalize()
+{
+  delete dpu_conn;
+  dpu_conn = nullptr;
+
+  delete dma_buf;
+  dma_buf = nullptr;
+
+  char *addr = (char *)recv_mr->addr;
+  CHECK(!ibv_dereg_mr(recv_mr));
+  delete[] addr;
 }
 
 void put_send(request_head head, const void *buf)
 {
   size_t put_size = sizeof(head) + head.size;
-  assert(put_size <= SEND_BUFFER_SIZE);
+  assert(put_size <= DMA_SIZE_SEND);
 
-  if (send_bytes + put_size > SEND_BUFFER_SIZE) {
+  if (send_bytes + put_size > DMA_SIZE_SEND) {
     flush();
+    assert(send_bytes == 0);
   }
 
   memcpy(send_buf+send_bytes, &head, sizeof(head));
@@ -69,27 +84,22 @@ void put_send(request_head head, const void *buf)
 
 void flush()
 {
-  char hej[] = "hej!!";
-  memcpy(dma_buf->buf, hej, sizeof(hej));
-  size_t len = sizeof(hej);
-  dpu_conn.qp.send_imm_inline(0, (char *)&len, sizeof(len));
-  dpu_conn.qp.wait_op(IBV_WC_SEND);
-
-  uint32_t rlen = dpu_conn.qp.wait_op(IBV_WC_RECV);
-  CHECK(rlen == sizeof(uint64_t));
-
-  uint64_t *dmalen = (uint64_t *)recv_mr->addr;
-  std::cout << "Got msg from dpu " <<
-    " dmalen = " << *dmalen << std::endl;
-  char *str = dma_buf->buf;
-  std::cout << "got: " << str << std::endl;
-
   if (send_bytes == 0)
     return;
 
+  uint64_t size = send_bytes;
+  dpu_conn->qp.send_imm_inline(IMM_DMA_SEND_BUF, (char *)&size, sizeof(size));
+  ibv_wc wc;
+  dpu_conn->qp.wait_send(&wc);
 
-  MPI_Send(&send_bytes, 1, MPI_UNSIGNED_LONG, !world_rank, 0, MPI_COMM_WORLD);
-  MPI_Send(send_buf, send_bytes, MPI_BYTE, !world_rank, 0, MPI_COMM_WORLD);
+  // Wait for DPU to finish transfer
+  // Possible optimization: don't block here
+  dpu_conn->qp.wait_recv(&wc);
+  CHECK(wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM);
+  CHECK(wc.byte_len == 0);
+  CHECK(wc.imm_data == IMM_DMA_SEND_BUF);
+
+  dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
 
   send_bytes = 0;
 }
@@ -119,18 +129,30 @@ static bool try_recv(request_head *head, void *data)
 
 bool poll_recv()
 {
-  // Possible optimization: "merge" contiguous processed requests to reduce
-  // number of hops in subsequent parses of the same buffer by increasing the
-  // size of the first one.
   size_t pos = 0;
   unsigned processed = 0;
   unsigned unprocessed = 0;
 
   if (recv_bytes == 0) {
-    MPI_Recv(&recv_bytes, 1, MPI_UNSIGNED_LONG, !world_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    MPI_Recv(recv_buf, recv_bytes, MPI_BYTE, !world_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    dpu_conn->qp.write_imm(IMM_DMA_RECV_BUF, NULL, NULL, 0, 0, 0, 0);
+    ibv_wc wc;
+    dpu_conn->qp.wait_send(&wc);
+
+    // Wait for DPU to finish transfer
+    // Possible optimization: don't block here
+    uint64_t *size = (uint64_t *)recv_mr->addr;
+    dpu_conn->qp.wait_recv(&wc);
+    CHECK(wc.opcode == IBV_WC_RECV);
+    CHECK(wc.byte_len == sizeof(*size));
+    CHECK(wc.imm_data == IMM_DMA_RECV_BUF);
+    recv_bytes = *size;
+
+    dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
   }
 
+  // Possible optimization: "merge" contiguous processed requests to reduce
+  // number of hops in subsequent parses of the same buffer by increasing the
+  // size of the first one.
   while (pos + sizeof(request_head) <= recv_bytes) {
     request_head *pos_head = reinterpret_cast<request_head*>(recv_buf+pos);
 
@@ -150,7 +172,7 @@ bool poll_recv()
   }
   assert(pos == recv_bytes);
 
-  if (!unprocessed) {
+  if (recv_bytes && !unprocessed) {
     std::cout << "emptied recv buffer" << std::endl;
     recv_bytes = 0;
   }

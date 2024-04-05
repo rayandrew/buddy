@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <unistd.h>
+#include <cassert>
 #include "rdma.h"
 #include "util.h"
 #include "sockets.h"
@@ -320,32 +321,29 @@ void QP::send_imm_inline(uint32_t tag, void *buf, unsigned len)
   }
 }
 
-uint32_t QP::wait_op(ibv_wc_opcode op)
+void QP::wait_op(ibv_wc *wc, ibv_cq *cq)
 {
-  ibv_wc wc;
   int n;
-
-  ibv_cq *cq = send_cq;
-  if (op & IBV_WC_RECV)
-    cq = recv_cq;
-
   do {
-    n = ibv_poll_cq(cq, 1, &wc);
+    n = ibv_poll_cq(cq, 1, wc);
   } while (n == 0);
+  CHECK(n > 0);
 
-  if (n < 0) {
-    FAIL("ibv_poll_cq failed");
+  if (wc->status != IBV_WC_SUCCESS) {
+    FAIL("unsuccessful status " << wc->status << " (vendor_err " << wc->vendor_err << ")");
   }
+}
 
-  if (wc.status != IBV_WC_SUCCESS) {
-    FAIL("unsuccessful status " << wc.status << " (vendor_err " << wc.vendor_err << ")");
-  }
+void QP::wait_send(ibv_wc *wc)
+{
+  wait_op(wc, send_cq);
+  CHECK(!(wc->opcode & IBV_WC_RECV));
+}
 
-  if (wc.opcode != op) {
-    FAIL("expected opcode " << op << " but got opcode " << wc.opcode);
-  }
-
-  return wc.byte_len;
+void QP::wait_recv(ibv_wc *wc)
+{
+  wait_op(wc, recv_cq);
+  CHECK(wc->opcode & IBV_WC_RECV);
 }
 
 void QP::recv(ibv_mr *mr, unsigned len)
@@ -364,6 +362,52 @@ void QP::recv(ibv_mr *mr, unsigned len)
   ibv_recv_wr *bad_wr;
   if (ibv_post_recv(qp, &wr, &bad_wr)) {
     FAIL("Failed to ibv_post_recv");
+  }
+}
+
+static void prepare_write_imm(ibv_send_wr *wr, ibv_sge *sge, uint32_t tag, void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey, uint64_t wr_id)
+{
+  ibv_send_wr w = {
+    .wr_id = wr_id,
+    .opcode = IBV_WR_RDMA_WRITE_WITH_IMM,
+    .send_flags = IBV_SEND_SIGNALED,
+    .imm_data = tag,
+    .wr = {
+      .rdma = {
+        .remote_addr = remote_addr,
+        .rkey = rkey,
+      },
+    },
+  };
+
+  if (len > 0) {
+    assert(len <= mr->length);
+    assert(buf >= mr->addr);
+    assert(buf <= (char *)mr->addr + mr->length - len);
+
+    *sge  = {
+      .addr   = (uint64_t) buf,
+      .length = (uint32_t) len,
+      .lkey   = mr->lkey
+    };
+
+    w.sg_list = sge;
+    w.num_sge = 1;
+  }
+
+  *wr = w;
+}
+
+void QP::write_imm(uint32_t tag, void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey, uint64_t wr_id)
+{
+  struct ibv_send_wr wr;
+  struct ibv_sge list;
+
+  prepare_write_imm(&wr, &list, tag, buf, mr, len, remote_addr, rkey, wr_id);
+
+  struct ibv_send_wr *bad_wr;
+  if (ibv_post_send(qp, &wr, &bad_wr)) {
+    FAIL("Failed to ibv_post_send");
   }
 }
 

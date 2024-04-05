@@ -48,12 +48,17 @@ class QP {
     void send_imm(uint32_t tag, ibv_mr *mr, unsigned len);
     void send_imm_inline(uint32_t tag, void *buf, unsigned len);
     void write_imm(uint32_t tag, void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey, uint64_t wr_id);
+    void write_imm(uint32_t tag)
+    {
+      write_imm(tag, NULL, NULL, 0, 0, 0, 0);
+    }
     void write(void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey);
     void read(void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey);
     void recv(ibv_mr *mr, unsigned len);
 
     void post_rdma_recv();
-    uint32_t wait_op(ibv_wc_opcode);
+    void wait_send(ibv_wc *wc);
+    void wait_recv(ibv_wc *wc);
 
     ibv_qp *get_qp() { return qp; }
     ibv_cq *get_recv_cq() { return recv_cq; }
@@ -67,6 +72,7 @@ class QP {
     bool own_cqs = false;
 
     void setup_common(ibv_srq *srq, int connfd);
+    void wait_op(ibv_wc *wc, ibv_cq *cq);
 };
 
 void init();
