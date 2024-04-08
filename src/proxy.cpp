@@ -133,6 +133,7 @@ void Proxy::rdma_loop()
               quit = true;
             break;
           }
+
         case IMM_DMA_SEND_BUF:
           {
             CHECK(msglen == sizeof(uint64_t));
