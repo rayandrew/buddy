@@ -1,7 +1,6 @@
 #include <iostream>
 #include <cassert>
 #include <mpi.h>
-#include <dlfcn.h>
 #include "util.h"
 #include "host_buffer.h"
 
@@ -19,12 +18,8 @@ int world_rank;
 
 int MPI_Init(int *argc, char ***argv)
 {
-  static int(*real_MPI_Init)(int *argc, char ***argv);
-  if(!real_MPI_Init)
-    real_MPI_Init = (int(*)(int *argc, char ***argv)) dlsym(RTLD_NEXT, "MPI_Init");
-
-  CHECK_MPI(real_MPI_Init(argc, argv));
-  CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
+  CHECK_MPI(PMPI_Init(argc, argv));
+  CHECK_MPI(PMPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
 
   buddy::host::init();
 
@@ -33,16 +28,12 @@ int MPI_Init(int *argc, char ***argv)
 
 int MPI_Finalize()
 {
-  static int(*real_MPI_Finalize)();
-  if(!real_MPI_Finalize)
-    real_MPI_Finalize = (int(*)()) dlsym(RTLD_NEXT, "MPI_Finalize");
-
   buddy::host::flush();
   
-  MPI_Barrier(MPI_COMM_WORLD);
+  PMPI_Barrier(MPI_COMM_WORLD);
   buddy::host::finalize();
 
-  CHECK_MPI(real_MPI_Finalize());
+  CHECK_MPI(PMPI_Finalize());
 
   return 0;
 }
@@ -53,7 +44,7 @@ int MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source, int tag,
   assert(comm == MPI_COMM_WORLD);
 
   int ds = -1;
-  CHECK_MPI(MPI_Type_size(datatype, &ds));
+  CHECK_MPI(PMPI_Type_size(datatype, &ds));
 
   CHECK(ds >= 0);
   CHECK(count >= 0);
@@ -82,7 +73,7 @@ int MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int t
   assert(comm == MPI_COMM_WORLD);
 
   int ds = 0;
-  CHECK_MPI(MPI_Type_size(datatype, &ds));
+  CHECK_MPI(PMPI_Type_size(datatype, &ds));
 
   CHECK(count >= 0);
   CHECK(ds >= 0);
