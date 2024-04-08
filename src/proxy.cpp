@@ -12,6 +12,7 @@ Proxy::~Proxy()
   delete[] buffer;
 
   delete[] recv_bufs;
+  delete[] client_recv_ready;
 }
 
 Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
@@ -49,6 +50,10 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
     char *buf = dma_engine->client_buf(i) + DMA_OFFSET_RECV;
     new (&recv_bufs[i]) ReqBufWrite(buf, DMA_SIZE_RECV);
   }
+
+  client_recv_ready = new bool[num_clients];
+  for (unsigned i = 0; i < num_clients; i++)
+    client_recv_ready[i] = true;
 }
 
 // As this is not latency-critical, we could use completion events to save cpu
@@ -165,7 +170,8 @@ void Proxy::rdma_loop()
 
         case IMM_DMA_RECV_BUF:
           {
-            // todo
+            assert(!client_recv_ready[client_idx]);
+            client_recv_ready[client_idx] = true;
             break;
           }
 
@@ -239,6 +245,10 @@ void Proxy::flush_dma()
   for (unsigned i = 0; i < num_clients; i++) {
     if (recv_bufs[i].empty())
       continue;
+
+    // We need to handle it somehow...
+    CHECK(client_recv_ready[i]);
+    client_recv_ready[i] = false;
 
     auto size = recv_bufs[i].get_pos();
     CHECK((uint32_t)size == size);

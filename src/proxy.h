@@ -39,7 +39,9 @@ class Proxy {
     ibv_mr *mr;
     absl::flat_hash_map<unsigned, unsigned> qp_num_to_idx;
     absl::flat_hash_map<int, unsigned> rank_to_idx;
+
     ReqBufWrite *recv_bufs;
+    bool *client_recv_ready;
 
     void post_recv(uint64_t wr_id);
 
