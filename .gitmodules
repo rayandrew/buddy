@@ -1,0 +1,3 @@
+[submodule "test/ember"]
+	path = test/ember
+	url = https://github.com/sstsimulator/ember.git
