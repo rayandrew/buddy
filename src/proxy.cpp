@@ -132,18 +132,23 @@ void Proxy::rdma_loop()
 
             uint64_t dmalen = *((uint64_t *)recv_buf);
             assert(dmalen > 0);
+            CHECK((uint32_t)dmalen == dmalen);
 
-            dma_engine->transfer(client_idx, DMA_OFFSET_SEND, dmalen, dma::H2D);
+            dma::jobspec job = {
+              .client = client_idx,
+              .offset = DMA_OFFSET_SEND,
+              .len = (uint32_t)dmalen,
+              .dir = dma::H2D,
+            };
+            dma_engine->transfer(job);
 
             // Optimization: do this in another thread
-            unsigned cl;
-            uint32_t offset;
-            dma::direction dir;
-            while (!dma_engine->poll(&cl, &offset, &dir));
+            job = {};
+            while (!dma_engine->poll(&job));
 
-            CHECK(cl == client_idx);
-            CHECK(offset == DMA_OFFSET_SEND);
-            CHECK(dir == dma::H2D);
+            CHECK(job.client == client_idx);
+            CHECK(job.offset == DMA_OFFSET_SEND);
+            CHECK(job.dir == dma::H2D);
 
             // Ack
             qps[client_idx].write_imm(IMM_DMA_SEND_BUF);
@@ -233,16 +238,22 @@ void Proxy::flush_dma()
     if (recv_bufs[i].empty())
       continue;
 
-    uint64_t size = recv_bufs[i].get_pos();
-    dma_engine->transfer(i, DMA_OFFSET_RECV, size, dma::D2H);
+    auto size = recv_bufs[i].get_pos();
+    CHECK((uint32_t)size == size);
 
-    unsigned cl;
-    uint32_t offset;
-    dma::direction dir;
-    while (!dma_engine->poll(&cl, &offset, &dir));
-    CHECK(cl == i);
-    CHECK(offset == DMA_OFFSET_RECV);
-    CHECK(dir == dma::D2H);
+    dma::jobspec job = {
+      .client = i,
+      .offset = DMA_OFFSET_RECV,
+      .len = (uint32_t)size,
+      .dir = dma::D2H,
+    };
+    dma_engine->transfer(job);
+
+    job = {};
+    while (!dma_engine->poll(&job));
+    CHECK(job.client == i);
+    CHECK(job.offset == DMA_OFFSET_RECV);
+    CHECK(job.dir == dma::D2H);
 
     qps[i].send_imm_inline(IMM_DMA_RECV_BUF, (char*)&size, sizeof(size));
     recv_bufs[i].reset_pos();

@@ -61,4 +61,5 @@ int main(int argc, char **argv)
   proxy.rdma_loop();
 
   delete[] qps;
+  delete[] conn_list;
 }

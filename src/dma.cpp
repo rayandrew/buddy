@@ -4,6 +4,8 @@
 #include <doca_mmap.h>
 #include <doca_buf_inventory.h>
 
+#include "valgrind/memcheck.h"
+
 #include "dma.h"
 #include "util.h"
 #include "sockets.h"
@@ -145,62 +147,41 @@ Engine::Engine(unsigned num_clients, int *socks)
   std::cout << "ok" << std::endl;
 }
 
-struct jobdata {
-  uint32_t client;
-  uint32_t offset:31;
-  uint32_t dir:1;
-};
-
-static_assert(sizeof(jobdata) == sizeof(doca_data));
-
-static doca_data encode_user_data(unsigned client, uint32_t offset, direction dir)
+void Engine::transfer(jobspec job)
 {
-  jobdata jd = { .client = client, .offset = offset, .dir = dir };
+  assert(job.client < num_clients);
+  assert(job.len <= buflen);
+  assert(job.offset < buflen);
 
-  assert(jd.client == client);
-  assert(jd.offset == offset);
-  assert(jd.dir == dir);
-
-  uint64_t *ptr = reinterpret_cast<uint64_t*>(&jd);
-  doca_data dd = { .u64 = *ptr };
-  return dd;
-}
-
-static void decode_user_data(doca_data data, unsigned *client, uint32_t *offset, direction *dir)
-{
-  jobdata *jd = reinterpret_cast<jobdata*>(&data.u64);
-
-  *client = jd->client;
-  *offset = jd->offset;
-  *dir = (direction)jd->dir;
-}
-
-void Engine::transfer(unsigned client, uint32_t offset, size_t len, direction dir)
-{
-  assert(client < num_clients);
-  assert(len <= buflen);
-  assert(offset < buflen);
-
-  CHECK_DOCA(doca_buf_set_data(doca_buf_local[client], local_buf + client*buflen + offset, len));
-  CHECK_DOCA(doca_buf_set_data(doca_buf_remote[client], remote_addr[client] + offset, len));
+  CHECK_DOCA(doca_buf_set_data(doca_buf_local[job.client],
+        local_buf + job.client*buflen + job.offset, job.len));
+  CHECK_DOCA(doca_buf_set_data(doca_buf_remote[job.client],
+        remote_addr[job.client] + job.offset, job.len));
 
   doca_buf *src_buf, *dst_buf;
-  if (dir == H2D) {
-    src_buf = doca_buf_remote[client];
-    dst_buf = doca_buf_local[client];
+  if (job.dir == H2D) {
+    src_buf = doca_buf_remote[job.client];
+    dst_buf = doca_buf_local[job.client];
+
+    VALGRIND_MAKE_MEM_UNDEFINED(local_buf + job.client*buflen + job.offset, job.len);
   } else {
-    src_buf = doca_buf_local[client];
-    dst_buf = doca_buf_remote[client];
+    src_buf = doca_buf_local[job.client];
+    dst_buf = doca_buf_remote[job.client];
+
+    VALGRIND_CHECK_MEM_IS_DEFINED(
+        local_buf + job.client*buflen + job.offset, job.len);
   }
 
   CHECK_DOCA(doca_buf_reset_data_len(dst_buf));
+
+  auto jobptr = new jobspec(job);
 
   doca_dma_job_memcpy dma_job = {
     .base = {
       .type = DOCA_DMA_JOB_MEMCPY,
       .flags = DOCA_JOB_FLAGS_NONE,
       .ctx = ctx,
-      .user_data = encode_user_data(client, offset, dir),
+      .user_data = { .ptr = jobptr },
     },
     .dst_buff = dst_buf,
     .src_buff = src_buf,
@@ -209,7 +190,7 @@ void Engine::transfer(unsigned client, uint32_t offset, size_t len, direction di
   CHECK_DOCA(doca_workq_submit(workq, &dma_job.base));
 }
 
-bool Engine::poll(unsigned *client, uint32_t *offset, direction *dir)
+bool Engine::poll(jobspec *job)
 {
   doca_event event = {0};
   doca_error_t result;
@@ -223,10 +204,17 @@ bool Engine::poll(unsigned *client, uint32_t *offset, direction *dir)
   CHECK_DOCA(result);
   CHECK_DOCA((doca_error_t)event.result.u64);
 
-  decode_user_data(event.user_data, client, offset, dir);
-  assert(*client < num_clients);
-  assert(*offset < buflen);
-  assert(*dir == H2D || *dir == D2H);
+  jobspec *jobptr = (jobspec*)event.user_data.ptr;
+  assert(jobptr->client < num_clients);
+  assert(jobptr->offset < buflen);
+  assert(jobptr->dir == H2D || jobptr->dir == D2H);
+
+  if (jobptr->dir == H2D)
+    VALGRIND_MAKE_MEM_DEFINED(
+        local_buf + jobptr->client*buflen + jobptr->offset, jobptr->len);
+
+  *job = *jobptr;
+  delete jobptr;
 
   return true;
 }

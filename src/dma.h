@@ -26,11 +26,18 @@ class Buffer {
 
 enum direction { H2D, D2H };
 
+struct jobspec {
+  unsigned client;
+  uint32_t offset;
+  uint32_t len;
+  direction dir;
+};
+
 class Engine {
   public:
     Engine(unsigned num_clients, int *socks);
-    void transfer(unsigned client, uint32_t offset, size_t len, direction dir);
-    bool poll(unsigned *client, uint32_t *offset, direction *dir);
+    void transfer(jobspec job);
+    bool poll(jobspec *job);
 
     char *client_buf(unsigned client)
     {

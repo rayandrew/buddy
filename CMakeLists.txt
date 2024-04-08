@@ -8,7 +8,7 @@ set(CMAKE_CXX_FLAGS "-g -Wall ${CMAKE_CXX_FLAGS}")
 find_package(MPI REQUIRED)
 find_package(absl REQUIRED)
 
-include_directories(src)
+include_directories(src valgrind)
 
 add_subdirectory(src)
 add_subdirectory(bin)
