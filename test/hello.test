@@ -1,1 +1,1 @@
-mpirun -np 2 $BUILD/bin/hello_buddy | grep 123
+mpirun -np 2 $BUILD/test/hello_buddy | grep 123

@@ -1,8 +1,3 @@
-# proxy
-add_executable(buddy-proxy proxy_main.cpp)
-target_link_libraries(buddy-proxy PRIVATE buddy_proxy)
-
-#examples
 add_executable(hello_mpi hello.cpp)
 target_link_libraries(hello_mpi PRIVATE MPI::MPI_C)
 

@@ -11,4 +11,4 @@ find_package(absl REQUIRED)
 include_directories(src valgrind)
 
 add_subdirectory(src)
-add_subdirectory(bin)
+add_subdirectory(test)

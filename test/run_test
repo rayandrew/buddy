@@ -6,7 +6,7 @@
 : ${BUILD?}
 
 ssh "$BUDDY_DPU" bash -c '"while pkill buddy-proxy; do :; done"'
-ssh "$BUDDY_DPU" "$DPU_BUILD/bin/buddy-proxy" & ssh_pid=$!
+ssh "$BUDDY_DPU" "$DPU_BUILD/src/buddy-proxy" & ssh_pid=$!
 sleep 1
 
 bash -xe "$1"

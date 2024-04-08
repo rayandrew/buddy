@@ -9,3 +9,6 @@ target_link_libraries(buddy_mpi PRIVATE MPI::MPI_C buddy_common)
 
 add_library(buddy_proxy STATIC proxy.cpp)
 target_link_libraries(buddy_proxy PUBLIC buddy_common)
+
+add_executable(buddy-proxy proxy_main.cpp)
+target_link_libraries(buddy-proxy PRIVATE buddy_proxy)
