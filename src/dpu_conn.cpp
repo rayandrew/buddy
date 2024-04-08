@@ -25,6 +25,9 @@ DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf)
 
   dma_buf->send(sock);
 
+  char x;
+  full_read(sock, &x, 1);
+
   close(sock);
 }
 

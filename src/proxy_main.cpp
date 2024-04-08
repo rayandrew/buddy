@@ -58,10 +58,16 @@ int main(int argc, char **argv)
   buddy::dpu::ProxyConfig config;
 
   buddy::dpu::Proxy proxy(config, cqs, conn_count, qps, &dma_engine, ranks);
+
+  char x = 0;
+  for (int i = 0; i < conn_count; i++) {
+    buddy::full_write(conn_list[i], &x, 1);
+    close(conn_list[i]);
+  }
+  delete[] conn_list;
+
   proxy.rdma_loop();
 
   delete[] qps;
-  delete[] conn_list;
-
   cqs.destroy();
 }
