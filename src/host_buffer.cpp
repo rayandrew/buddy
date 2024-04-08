@@ -3,6 +3,7 @@
 #include <cstring>
 #include <mpi.h>
 #include <absl/container/flat_hash_map.h>
+#include "valgrind/memcheck.h"
 #include "host_buffer.h"
 #include "dpu_conn.h"
 #include "util.h"
@@ -117,11 +118,6 @@ bool poll_recv()
   unsigned unprocessed = 0;
 
   if (recv_buf.empty()) {
-    /*
-    dpu_conn->qp.write_imm(IMM_DMA_RECV_BUF, NULL, NULL, 0, 0, 0, 0);
-    dpu_conn->qp.wait_send(&wc);
-    */
-
     ibv_wc wc;
     if (dpu_conn->qp.poll_recv(&wc)) {
       uint64_t *size = (uint64_t *)recv_mr->addr;
@@ -129,6 +125,8 @@ bool poll_recv()
       CHECK(wc.byte_len == sizeof(*size));
       CHECK(wc.imm_data == IMM_DMA_RECV_BUF);
       recv_buf.reset_len(*size);
+
+      VALGRIND_MAKE_MEM_DEFINED(dma_buf->buf + DMA_OFFSET_RECV, *size);
 
       dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
     } else {
@@ -149,8 +147,17 @@ bool poll_recv()
 
   if (unprocessed)
     recv_buf.reset_pos();
-  else
+  else {
+    // We finished with the buffer, ready to receive another
     recv_buf.reset_len(0);
+
+    VALGRIND_MAKE_MEM_UNDEFINED(dma_buf->buf + DMA_OFFSET_RECV, DMA_SIZE_RECV);
+
+    dpu_conn->qp.write_imm(IMM_DMA_RECV_BUF, NULL, NULL, 0, 0, 0, 0);
+    // Optimization: dont need to block
+    ibv_wc wc;
+    dpu_conn->qp.wait_send(&wc);
+  }
 
   return processed > 0;
 }

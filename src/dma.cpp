@@ -61,6 +61,12 @@ Buffer::Buffer(size_t len)
   CHECK_DOCA(doca_mmap_start(dmap));
 }
 
+Buffer::~Buffer()
+{
+  CHECK_DOCA(doca_mmap_destroy(dmap));
+  CHECK_DOCA(doca_dev_close(dev));
+}
+
 void Buffer::send(int sockfd)
 {
   const void *export_desc = NULL;

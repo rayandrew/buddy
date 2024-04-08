@@ -14,6 +14,7 @@ namespace buddy::dma {
 class Buffer {
   public:
     Buffer(size_t len);
+    ~Buffer();
     void send(int sockfd);
 
     char * const buf;
