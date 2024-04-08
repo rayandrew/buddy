@@ -1,11 +1,15 @@
-add_executable(hello_mpi hello.cpp)
-target_link_libraries(hello_mpi PRIVATE MPI::MPI_C)
+foreach(case hello around-the-world)
+    add_executable(${case}_mpi ${case}.cpp)
+    target_link_libraries(${case}_mpi PRIVATE MPI::MPI_C)
 
-add_executable(hello_buddy hello.cpp)
-target_link_libraries(hello_buddy PRIVATE buddy_mpi MPI::MPI_C)
+    add_executable(${case}_buddy ${case}.cpp)
+    target_link_libraries(${case}_buddy PRIVATE buddy_mpi MPI::MPI_C)
+endforeach()
 
-add_executable(around-the-world_mpi around-the-world.cpp)
-target_link_libraries(around-the-world_mpi PRIVATE MPI::MPI_C)
+foreach(case halo3d)
+    add_executable(${case}_mpi ember/mpi/${case}/${case}.c)
+    target_link_libraries(${case}_mpi PRIVATE MPI::MPI_C)
 
-add_executable(around-the-world_buddy around-the-world.cpp)
-target_link_libraries(around-the-world_buddy PRIVATE buddy_mpi MPI::MPI_C)
+    add_executable(${case}_buddy ember/mpi/${case}/${case}.c)
+    target_link_libraries(${case}_buddy PRIVATE buddy_mpi MPI::MPI_C)
+endforeach()
