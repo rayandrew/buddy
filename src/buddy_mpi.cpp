@@ -93,8 +93,6 @@ int MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int t
 
 int MPI_Wait(MPI_Request *mpi_req, MPI_Status *status)
 {
-  CHECK(status == MPI_STATUS_IGNORE);
-
   if (*mpi_req == MPI_REQUEST_NULL)
     return 0;
 
@@ -105,9 +103,26 @@ int MPI_Wait(MPI_Request *mpi_req, MPI_Status *status)
     while (!buddy::host::poll_recv())
       buddy::host::flush();
 
+  if (status != MPI_STATUS_IGNORE) {
+    status->MPI_SOURCE = handle->head.src;
+    status->MPI_TAG = handle->head.tag;
+    status->MPI_ERROR = MPI_SUCCESS;
+  }
+
   buddy::host::delete_recv(handle);
 
   *mpi_req = MPI_REQUEST_NULL;
+
+  return 0;
+}
+
+int MPI_Waitall(int count, MPI_Request mpi_reqs[], MPI_Status statuses[])
+{
+  for (int i = 0; i < count; i++)
+    if (statuses == MPI_STATUSES_IGNORE)
+      MPI_Wait(mpi_reqs+i, MPI_STATUS_IGNORE);
+    else
+      MPI_Wait(mpi_reqs+i, statuses+i);
 
   return 0;
 }
