@@ -77,6 +77,8 @@ void Context::init()
     FAIL("ib setup failed");
   }
 
+  ibv_free_device_list(dev_list);
+
   // Allocate a Protection Domain:
   pd = ibv_alloc_pd(ctx);
   if (!pd)
@@ -146,6 +148,13 @@ server_cqs::server_cqs()
 
   send = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
   recv = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+}
+
+void server_cqs::destroy()
+{
+  CHECK(!ibv_destroy_cq(send));
+  CHECK(!ibv_destroy_cq(recv));
+  CHECK(!ibv_destroy_srq(srq));
 }
 
 QP::QP(int connfd)

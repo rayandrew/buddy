@@ -10,6 +10,8 @@ Proxy::~Proxy()
   char *buffer = (char *)mr->addr;
   CHECK(!ibv_dereg_mr(mr));
   delete[] buffer;
+
+  delete[] recv_bufs;
 }
 
 Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,

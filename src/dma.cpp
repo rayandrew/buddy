@@ -98,7 +98,6 @@ Engine::Engine(unsigned num_clients, int *socks)
   local_buf = new char[num_clients * buflen];
   remote_addr = new char*[num_clients];
 
-  doca_dma *dma_ctx;
   CHECK_DOCA(doca_dma_create(&dma_ctx));
   ctx = doca_dma_as_ctx(dma_ctx);
 
@@ -145,6 +144,35 @@ Engine::Engine(unsigned num_clients, int *socks)
   delete[] bds;
 
   std::cout << "ok" << std::endl;
+}
+
+Engine::~Engine()
+{
+  for (unsigned i = 0; i < num_clients; i++) {
+    CHECK_DOCA(doca_buf_refcount_rm(doca_buf_local[i], NULL));
+    CHECK_DOCA(doca_buf_refcount_rm(doca_buf_remote[i], NULL));
+  }
+
+  delete[] doca_buf_remote;
+  delete[] doca_buf_local;
+
+  CHECK_DOCA(doca_buf_inventory_destroy(buf_inv));
+
+  for (unsigned i = 0; i < num_clients; i++)
+    CHECK_DOCA(doca_mmap_destroy(remote_map[i]));
+  delete[] remote_map;
+
+  CHECK_DOCA(doca_mmap_destroy(local_map));
+
+  delete[] remote_addr;
+
+  CHECK_DOCA(doca_ctx_workq_rm(ctx, workq));
+  CHECK_DOCA(doca_workq_destroy(workq));
+
+  CHECK_DOCA(doca_ctx_stop(ctx));
+  CHECK_DOCA(doca_dma_destroy(dma_ctx));
+
+  delete[] local_buf;
 }
 
 void Engine::transfer(jobspec job)

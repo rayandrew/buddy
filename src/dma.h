@@ -3,6 +3,7 @@
 struct doca_dev;
 struct doca_mmap;
 struct doca_ctx;
+struct doca_dma;
 struct doca_buf_inventory;
 struct doca_workq;
 struct doca_buf;
@@ -36,6 +37,7 @@ struct jobspec {
 class Engine {
   public:
     Engine(unsigned num_clients, int *socks);
+    ~Engine();
     void transfer(jobspec job);
     bool poll(jobspec *job);
 
@@ -52,6 +54,7 @@ class Engine {
 
     doca_dev *dev;
     doca_ctx *ctx;
+    doca_dma *dma_ctx;
     doca_mmap *local_map;
     doca_buf_inventory *buf_inv;
     doca_workq *workq;

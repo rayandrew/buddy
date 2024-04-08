@@ -14,6 +14,7 @@ struct IBDest {
 
 struct server_cqs {
   server_cqs();
+  void destroy();
 
   ibv_srq *srq;
   ibv_cq *send;

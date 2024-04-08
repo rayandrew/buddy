@@ -62,4 +62,6 @@ int main(int argc, char **argv)
 
   delete[] qps;
   delete[] conn_list;
+
+  cqs.destroy();
 }
