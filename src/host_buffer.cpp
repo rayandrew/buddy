@@ -14,6 +14,7 @@
 namespace buddy::host {
 
 ReqBufWrite send_buf;
+bool hold_send_buf = false;
 ReqBufRead recv_buf;
 
 int world_rank;
@@ -67,10 +68,55 @@ void put_send(request_head head, const char *data)
     flush();
 }
 
+static bool poll_rdma_recv()
+{
+  ibv_wc wc;
+  if (!dpu_conn->qp.poll_recv(&wc))
+    return false;
+
+  switch (wc.imm_data) {
+    case IMM_DMA_SEND_BUF:
+      {
+        CHECK(wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM);
+        CHECK(wc.byte_len == 0);
+
+        hold_send_buf = false;
+        send_buf.reset_pos();
+
+        break;
+      }
+
+    case IMM_DMA_RECV_BUF:
+      {
+        uint64_t *size = (uint64_t *)recv_mr->addr;
+        CHECK(wc.opcode == IBV_WC_RECV);
+        CHECK(wc.byte_len == sizeof(*size));
+
+        recv_buf.reset_len(*size);
+        VALGRIND_MAKE_MEM_DEFINED(dma_buf->buf + DMA_OFFSET_RECV, *size);
+
+        break;
+      }
+
+    default:
+      {
+        FAIL("unknown imm_data " << wc.imm_data);
+      }
+  }
+
+  // Todo: multi recv request
+  dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
+
+  return true;
+}
+
 void flush()
 {
   if (send_buf.empty())
     return;
+
+  assert(!hold_send_buf);
+  hold_send_buf = true;
 
   uint64_t size = send_buf.get_pos();
   dpu_conn->qp.send_imm_inline(IMM_DMA_SEND_BUF, (char *)&size, sizeof(size));
@@ -79,14 +125,10 @@ void flush()
 
   // Wait for DPU to finish transfer
   // Possible optimization: don't block here?
-  dpu_conn->qp.wait_recv(&wc);
-  CHECK(wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM);
-  CHECK(wc.byte_len == 0);
-  CHECK(wc.imm_data == IMM_DMA_SEND_BUF);
+  while (hold_send_buf)
+    poll_rdma_recv();
 
-  dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
-
-  send_buf.reset_pos();
+  assert(send_buf.empty());
 }
 
 static bool try_recv(request_head *head, char *data)
@@ -118,20 +160,9 @@ bool poll_recv()
   unsigned unprocessed = 0;
 
   if (recv_buf.empty()) {
-    ibv_wc wc;
-    if (dpu_conn->qp.poll_recv(&wc)) {
-      uint64_t *size = (uint64_t *)recv_mr->addr;
-      CHECK(wc.opcode == IBV_WC_RECV);
-      CHECK(wc.byte_len == sizeof(*size));
-      CHECK(wc.imm_data == IMM_DMA_RECV_BUF);
-      recv_buf.reset_len(*size);
-
-      VALGRIND_MAKE_MEM_DEFINED(dma_buf->buf + DMA_OFFSET_RECV, *size);
-
-      dpu_conn->qp.recv(recv_mr, RDMA_SIZE);
-    } else {
+    poll_rdma_recv();
+    if (recv_buf.empty())
       return false;
-    }
   }
 
   request_head *head;

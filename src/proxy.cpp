@@ -74,7 +74,7 @@ void Proxy::harvest_wcs()
 
     for (int i = 0; i < n; i++) {
       if (wc[i].status != IBV_WC_SUCCESS)
-        FAIL("wc with error ");
+        FAIL("unsuccessful status " << wc[i].status << " (vendor_err " << wc[i].vendor_err << ")");
 
       if (wc[i].opcode & IBV_WC_RECV)
         FAIL("recv completion in send queue");
@@ -99,15 +99,20 @@ void Proxy::rdma_loop()
     FAIL("failed to create thread");
 
   unsigned quit_counter = 0;
+  bool pending_dma_flush = false;
 
   while (!quit) {
     ibv_wc wc[rx_depth];
 
-    int n;
-    do {
-      n = ibv_poll_cq(cqs.recv, rx_depth, wc);
-    } while (n == 0 && !quit);
+    int n = ibv_poll_cq(cqs.recv, rx_depth, wc);
+    CHECK(n >= 0);
 
+    if (!n && pending_dma_flush)
+      if (try_flush_dma())
+        pending_dma_flush = false;
+
+    while (n == 0 && !quit)
+      n = ibv_poll_cq(cqs.recv, rx_depth, wc);
     CHECK(n >= 0);
 
     if (n > 0)
@@ -164,7 +169,8 @@ void Proxy::rdma_loop()
             // Optimization: async
             char *src_buf = dma_engine->client_buf(client_idx) + DMA_OFFSET_SEND;
             route_reqs(src_buf, dmalen);
-            flush_dma();
+
+            pending_dma_flush = true;
 
             break;
           }
@@ -236,19 +242,25 @@ void Proxy::route_reqs(char *buf, size_t len)
     // Optimization: unnecessary to flush all buffers here
     // Also, could be async?
     while (!recv_bufs[dst_client].append(*head, data))
-      flush_dma();
+      if (!try_flush_dma())
+        FAIL("recv buffer is full, but cannot be flushed!");
   }
 }
 
-void Proxy::flush_dma()
+bool Proxy::try_flush_dma()
 {
+  bool all_flushed = true;
+
   // Optimization: queue up all transfers at once
   for (unsigned i = 0; i < num_clients; i++) {
     if (recv_bufs[i].empty())
       continue;
 
-    // We need to handle it somehow...
-    CHECK(client_recv_ready[i]);
+    if (!client_recv_ready[i]) {
+      all_flushed = false;
+      continue;
+    }
+
     client_recv_ready[i] = false;
 
     auto size = recv_bufs[i].get_pos();
@@ -271,6 +283,8 @@ void Proxy::flush_dma()
     qps[i].send_imm_inline(IMM_DMA_RECV_BUF, (char*)&size, sizeof(size));
     recv_bufs[i].reset_pos();
   }
+
+  return all_flushed;
 }
 
 } // namespace buddy::dpu

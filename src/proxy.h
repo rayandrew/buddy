@@ -49,7 +49,7 @@ class Proxy {
     friend void *run_harvest_thread(void *arg);
 
     void route_reqs(char *buf, size_t len);
-    void flush_dma();
+    bool try_flush_dma();
 };
 
 } // namespace buddy::dpu
