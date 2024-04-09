@@ -11,14 +11,13 @@ bool ReqBufRead::next(request_head **out_head, char **out_data, int dst)
 {
   while (pos + sizeof(request_head) <= len) {
     request_head *pos_head = reinterpret_cast<request_head*>(buf+pos);
-
-    if (dst >= 0 && pos_head->dst != dst)
-      continue;
-
     char *data = reinterpret_cast<char*>(pos_head+1);
 
     pos += sizeof(request_head) + pos_head->size;
     assert(pos <= len);
+
+    if (dst >= 0 && pos_head->dst != dst)
+      continue;
 
     *out_head = pos_head;
     *out_data = data;
