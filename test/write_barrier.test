@@ -1,0 +1,1 @@
+mpirun -np 2 $BUILD/test/write_barrier_buddy | grep 123

@@ -1,4 +1,4 @@
-foreach(case hello around-the-world)
+foreach(case hello around-the-world write_barrier)
     add_executable(${case}_mpi ${case}.cpp)
     target_link_libraries(${case}_mpi PRIVATE MPI::MPI_C)
 
