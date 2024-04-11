@@ -126,3 +126,13 @@ int MPI_Waitall(int count, MPI_Request mpi_reqs[], MPI_Status statuses[])
 
   return 0;
 }
+
+int MPI_Barrier(MPI_Comm comm)
+{
+  assert(comm == MPI_COMM_WORLD);
+
+  // Required for test write_barrier to avoid deadlock
+  buddy::host::flush();
+
+  return PMPI_Barrier(comm);
+}
