@@ -129,6 +129,7 @@ void flush()
     poll_rdma_recv();
 
   assert(send_buf.empty());
+  assert(!hold_send_buf);
 }
 
 static bool try_recv(request_head *head, char *data)

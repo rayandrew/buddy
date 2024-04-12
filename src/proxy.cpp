@@ -24,6 +24,7 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   , dma_engine(dma_engine)
   , quit(false)
   , rx_depth(2*num_clients)
+  , idx_to_rank(ranks)
 {
   size_t total_size = PROXY_BUF_SIZE * rx_depth;
   char *buffer = new char[total_size];
@@ -39,7 +40,11 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
 
   for (unsigned i = 0; i < num_clients; i++)
     rank_to_idx[ranks[i]] = i;
-  delete[] ranks;
+
+  std::cout << "ranks:";
+  for (unsigned i = 0; i < num_clients; i++)
+    std::cout << " " << ranks[i];
+  std::cout << std::endl;
 
   for (uint64_t wr_id = 0; wr_id < rx_depth; wr_id++) {
     post_recv(wr_id);
@@ -107,12 +112,24 @@ void Proxy::rdma_loop()
     int n = ibv_poll_cq(cqs.recv, rx_depth, wc);
     CHECK(n >= 0);
 
-    if (!n && pending_dma_flush)
+    const double DEADLOCK_TIME = 1.0;
+    double poll_start = 0.0;
+
+    if (!n && pending_dma_flush) {
       if (try_flush_dma())
         pending_dma_flush = false;
+      else
+        poll_start = clock();
+    }
 
-    while (n == 0 && !quit)
+    while (n == 0 && !quit) {
+      if (poll_start && clock()-poll_start > DEADLOCK_TIME) {
+        std::cerr << "warning: Possible deadlock detected while waiting for client DMA buffer to be ready!" << std::endl;
+        poll_start = 0.0;
+      }
+
       n = ibv_poll_cq(cqs.recv, rx_depth, wc);
+    }
     CHECK(n >= 0);
 
     if (n > 0)
