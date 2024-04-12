@@ -4,7 +4,7 @@ project(buddy)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_FLAGS "-g -Wall ${CMAKE_CXX_FLAGS}")
-set(CMAKE_C_FLAGS "-g -Wall ${CMAKE_CXX_FLAGS}")
+set(CMAKE_C_FLAGS "-g -Wall ${CMAKE_C_FLAGS}")
 
 find_package(MPI REQUIRED)
 find_package(absl REQUIRED)
