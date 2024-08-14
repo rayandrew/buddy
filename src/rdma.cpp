@@ -302,14 +302,42 @@ QP::~QP()
   recv_cq = NULL;
 }
 
-void QP::send_imm_inline(uint32_t tag, void *buf, unsigned len)
+void QP::send_imm(uint32_t tag, ibv_mr *mr, unsigned len, unsigned offset)
+{
+  if (len <= max_inline_data) {
+    send_imm_inline(tag, mr->addr, len, offset);
+    return;
+  }
+
+  struct ibv_sge list = {
+    .addr	  = (uint64_t) mr->addr + offset,
+    .length = (uint32_t) len,
+    .lkey	  = mr->lkey
+  };
+
+  struct ibv_send_wr *bad_wr;
+
+  struct ibv_send_wr wr = {
+    .sg_list = &list,
+    .num_sge = 1,
+    .opcode = IBV_WR_SEND_WITH_IMM,
+    .send_flags = IBV_SEND_SIGNALED,
+    .imm_data = tag,
+  };
+
+  int err = ibv_post_send(qp, &wr, &bad_wr);
+  if (err)
+    FAIL("Failed to ibv_post_send: " << strerror(err));
+}
+
+void QP::send_imm_inline(uint32_t tag, void *buf, unsigned len, unsigned offset)
 {
   if (len > max_inline_data) {
     FAIL("above max inline size " << len << " > " << max_inline_data);
   }
 
   struct ibv_sge list = {
-    .addr	  = (uint64_t) buf,
+    .addr	  = (uint64_t) buf + offset,
     .length = (uint32_t) len,
   };
 

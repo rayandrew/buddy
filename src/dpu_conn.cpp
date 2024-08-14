@@ -23,7 +23,12 @@ DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf)
 
   new (&qp) rdma::QP(sock);
 
-  dma_buf->send(sock);
+#ifdef LOCAL_DMA
+  if (dma_buf)
+    dma_buf->send(sock);
+#else
+  CHECK(!dma_buf);
+#endif
 
   char x;
   full_read(sock, &x, 1);

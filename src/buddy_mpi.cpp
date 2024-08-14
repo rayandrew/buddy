@@ -2,6 +2,7 @@
 #include <cassert>
 #include <mpi.h>
 #include "util.h"
+#include "util_mpi.h"
 #include "host_buffer.h"
 
 /* Communicator: for now assuming WORLD. We can do bypass on others probably */

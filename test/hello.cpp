@@ -1,6 +1,6 @@
 #include <iostream>
 #include <mpi.h>
-#include "util.h"
+#include "util_mpi.h"
 
 int main(int argc, char **argv)
 {

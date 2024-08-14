@@ -46,8 +46,8 @@ class QP {
     ~QP();
 
     void send(ibv_mr *mr, void *buf, unsigned len, uint64_t wr_id);
-    void send_imm(uint32_t tag, ibv_mr *mr, unsigned len);
-    void send_imm_inline(uint32_t tag, void *buf, unsigned len);
+    void send_imm(uint32_t tag, ibv_mr *mr, unsigned len, unsigned offset = 0);
+    void send_imm_inline(uint32_t tag, void *buf, unsigned len, unsigned offset = 0);
     void write_imm(uint32_t tag, void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey, uint64_t wr_id);
     void write_imm(uint32_t tag)
     {

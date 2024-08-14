@@ -6,7 +6,10 @@
 #include "util.h"
 #include "rdma.h"
 #include "proxy.h"
+
+#ifdef LOCAL_DMA
 #include "dma.h"
+#endif
 
 int main(int argc, char **argv)
 {
@@ -53,11 +56,17 @@ int main(int argc, char **argv)
   for (int i = 0; i < conn_count; i++)
     new (&qps[i]) buddy::rdma::QP(cqs, conn_list[i]);
 
+#ifdef LOCAL_DMA
   buddy::dma::Engine dma_engine(conn_count, conn_list);
+#endif
 
   buddy::dpu::ProxyConfig config;
 
-  buddy::dpu::Proxy proxy(config, cqs, conn_count, qps, &dma_engine, ranks);
+  buddy::dpu::Proxy proxy(config, cqs, conn_count, qps,
+#ifdef LOCAL_DMA
+		  &dma_engine,
+#endif
+		  ranks);
 
   char x = 0;
   for (int i = 0; i < conn_count; i++) {

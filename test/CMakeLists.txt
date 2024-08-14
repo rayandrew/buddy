@@ -1,3 +1,7 @@
+if(NOT MPI_FOUND)
+	return()
+endif()
+
 foreach(case hello around-the-world write_barrier iter double_buf)
     add_executable(${case}_mpi ${case}.cpp)
     target_link_libraries(${case}_mpi PRIVATE MPI::MPI_C)
