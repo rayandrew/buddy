@@ -2,6 +2,7 @@
 #include "proxy.h"
 #include "util.h"
 #include "local_proto.h"
+#include "valgrind/memcheck.h"
 
 namespace buddy::dpu {
 
@@ -166,6 +167,7 @@ void Proxy::rdma_loop()
       uint64_t wr_id = wc[i].wr_id;
       char *recv_buf = (char *)h2d_mr->addr + wr_id * PROXY_BUF_SIZE;
       size_t msglen = wc[i].byte_len;
+      VALGRIND_MAKE_MEM_DEFINED(recv_buf, msglen);
 
       switch (imm_tag) {
         case IMM_QUIT:
@@ -274,6 +276,7 @@ void Proxy::post_recv(uint64_t wr_id)
     .length = PROXY_BUF_SIZE,
     .lkey	= h2d_mr->lkey
   };
+  VALGRIND_MAKE_MEM_UNDEFINED(list.addr, list.length);
 
   struct ibv_recv_wr *bad_wr;
   struct ibv_recv_wr wr = {
