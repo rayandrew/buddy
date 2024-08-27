@@ -13,8 +13,8 @@ struct local_init {
   int32_t host_recv_bufs;
 };
 
-const size_t DMA_SIZE_SEND = 64*1024;
-const size_t DMA_SIZE_RECV = 64*1024;
+const size_t DMA_SIZE_SEND = 64*1024*1024;
+const size_t DMA_SIZE_RECV = 64*1024*1024;
 
 const size_t DMA_OFFSET_SEND = 0;
 const size_t DMA_OFFSET_RECV = DMA_SIZE_RECV;
