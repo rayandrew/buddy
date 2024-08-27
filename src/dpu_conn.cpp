@@ -1,5 +1,6 @@
 #include <iostream>
 #include <unistd.h>
+#include <assert.h>
 #include "dpu_conn.h"
 #include "sockets.h"
 #include "local_proto.h"
@@ -8,7 +9,7 @@
 
 namespace buddy::host {
 
-DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf)
+DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf, int host_recv_bufs)
 {
   char *host = getenv("BUDDY_DPU");
   CHECK(host && *host);
@@ -17,7 +18,13 @@ DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf)
 
   local_init msg = {
     .world_rank = world_rank,
-    .world_size = world_size
+    .world_size = world_size,
+#ifdef LOCAL_DMA
+    .local_dma = true,
+#else
+    .local_dma = false,
+#endif
+    .host_recv_bufs = host_recv_bufs,
   };
   full_write(sock, (char *)&msg, sizeof(msg));
 
@@ -27,7 +34,7 @@ DpuConn::DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf)
   if (dma_buf)
     dma_buf->send(sock);
 #else
-  CHECK(!dma_buf);
+  assert(!dma_buf);
 #endif
 
   char x;

@@ -410,15 +410,16 @@ bool QP::poll_recv(ibv_wc *wc)
   }
 }
 
-void QP::recv(ibv_mr *mr, unsigned len)
+void QP::recv(ibv_mr *mr, unsigned len, unsigned offset, uint64_t wr_id)
 {
   ibv_sge list = {
-    .addr = (uint64_t) mr->addr,
+    .addr = (uint64_t) mr->addr + offset,
     .length = (uint32_t) len,
     .lkey = mr->lkey,
   };
 
   ibv_recv_wr wr = {
+    .wr_id = wr_id,
     .sg_list = &list,
     .num_sge = 1,
   };

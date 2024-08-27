@@ -19,7 +19,9 @@ namespace buddy::host {
 
 ReqBufWrite send_buf;
 bool hold_send_buf = false;
-ReqBufRead recv_buf;
+
+int num_recv_bufs;
+ReqBufRead *recv_bufs;
 
 int world_rank;
 int world_size;
@@ -36,8 +38,14 @@ void init()
 {
   rdma::init();
 
-  char *rdma_recv_buf = new char[DMA_SIZE_RECV];
-  recv_mr = ibv_reg_mr(rdma::Context::get().get_pd(), rdma_recv_buf, DMA_SIZE_RECV,
+  char *env = getenv("BUDDY_RECV_BUFS");
+  if (env)
+    num_recv_bufs = atoi(env);
+  if (!num_recv_bufs)
+    num_recv_bufs = 2;
+
+  char *rdma_recv_buf = new char[num_recv_bufs*DMA_SIZE_RECV];
+  recv_mr = ibv_reg_mr(rdma::Context::get().get_pd(), rdma_recv_buf, num_recv_bufs*DMA_SIZE_RECV,
       IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
   CHECK(recv_mr);
 
@@ -56,14 +64,15 @@ void init()
   CHECK(send_mr);
 
   send_buf = ReqBufWrite(rdma_send_buf, DMA_SIZE_SEND);
-  recv_buf = ReqBufRead((char *)recv_mr->addr, 0);
+  recv_bufs = new ReqBufRead[num_recv_bufs];
+  for (int i = 0; i < num_recv_bufs; i++)
+    new (&recv_bufs[i]) ReqBufRead((char *)recv_mr->addr + i*DMA_SIZE_RECV, 0);
 #endif
 
-  dpu_conn = new DpuConn(world_rank, world_size,
-      dma_buf
-      );
+  dpu_conn = new DpuConn(world_rank, world_size, dma_buf, num_recv_bufs);
 
-  dpu_conn->qp.recv(recv_mr, DMA_SIZE_RECV);
+  for (int i = 0; i < num_recv_bufs; i++)
+    dpu_conn->qp.recv(recv_mr, DMA_SIZE_RECV, i*DMA_SIZE_RECV, i);
 }
 
 void finalize()
@@ -86,6 +95,8 @@ void finalize()
     CHECK(!ibv_dereg_mr(send_mr));
     delete[] addr;
   }
+
+  delete[] recv_bufs;
 }
 
 void put_send(request_head head, const char *data)
@@ -120,7 +131,7 @@ static bool poll_rdma_recv()
       {
 #ifndef LOCAL_DMA
         FAIL("unexpected dma message");
-#endif
+#else
 
         uint64_t *size = (uint64_t *)recv_mr->addr;
         CHECK(wc.opcode == IBV_WC_RECV);
@@ -128,6 +139,7 @@ static bool poll_rdma_recv()
 
         recv_buf.reset_len(*size);
         VALGRIND_MAKE_MEM_DEFINED(dma_buf->buf + DMA_OFFSET_RECV, *size);
+#endif
 
         break;
       }
@@ -137,8 +149,8 @@ static bool poll_rdma_recv()
         uint64_t size = wc.byte_len;
         CHECK(wc.opcode == IBV_WC_RECV);
 
-        recv_buf.reset_len(size);
-        VALGRIND_MAKE_MEM_DEFINED(recv_mr->addr, size);
+        recv_bufs[wc.wr_id].reset_len(size);
+        VALGRIND_MAKE_MEM_DEFINED((char *)recv_mr->addr + wc.wr_id*DMA_SIZE_RECV, size);
 
         break;
       }
@@ -149,8 +161,9 @@ static bool poll_rdma_recv()
       }
   }
 
-  // Todo: multi recv request
+#ifdef LOCAL_DMA
   dpu_conn->qp.recv(recv_mr, DMA_SIZE_RECV);
+#endif
 
   return true;
 }
@@ -214,42 +227,47 @@ static bool try_recv(request_head *head, char *data)
 bool poll_recv()
 {
   unsigned processed = 0;
-  unsigned unprocessed = 0;
 
-  if (recv_buf.empty()) {
-    poll_rdma_recv();
-    if (recv_buf.empty())
-      return false;
-  }
+  for (int i = 0; i < num_recv_bufs; i++) {
+    unsigned unprocessed = 0;
 
-  request_head *head;
-  char *data;
-  while (recv_buf.next(&head, &data, world_rank)) {
-    if (try_recv(head, data)) {
-      head->dst = !world_rank;
-      processed++;
-    } else {
-      unprocessed++;
+    if (recv_bufs[i].empty()) {
+      poll_rdma_recv();
+      if (recv_bufs[i].empty())
+        continue;
     }
-  }
 
-  if (unprocessed)
-    recv_buf.reset_pos();
-  else {
-    // We finished with the buffer, ready to receive another
-    recv_buf.reset_len(0);
+    request_head *head;
+    char *data;
+    while (recv_bufs[i].next(&head, &data, world_rank)) {
+      if (try_recv(head, data)) {
+        head->dst = !world_rank;
+        processed++;
+      } else {
+        unprocessed++;
+      }
+    }
+
+    if (unprocessed)
+      recv_bufs[i].reset_pos();
+    else {
+      // We finished with the buffer, ready to receive another
+      recv_bufs[i].reset_len(0);
 
 #ifdef LOCAL_DMA
-    VALGRIND_MAKE_MEM_UNDEFINED(dma_buf->buf + DMA_OFFSET_RECV, DMA_SIZE_RECV);
-    dpu_conn->qp.write_imm(IMM_D2H_DMA, NULL, NULL, 0, 0, 0, 0);
+      VALGRIND_MAKE_MEM_UNDEFINED(dma_buf->buf + DMA_OFFSET_RECV, DMA_SIZE_RECV);
+      dpu_conn->qp.write_imm(IMM_D2H_DMA, NULL, NULL, 0, 0, 0, 0);
 #else
-    VALGRIND_MAKE_MEM_UNDEFINED(recv_mr->addr, DMA_SIZE_RECV);
-    dpu_conn->qp.write_imm(IMM_D2H_RDMA, NULL, NULL, 0, 0, 0, 0);
+
+      VALGRIND_MAKE_MEM_UNDEFINED((char *)recv_mr->addr + i*DMA_SIZE_RECV, DMA_SIZE_RECV);
+      dpu_conn->qp.recv(recv_mr, DMA_SIZE_RECV, i*DMA_SIZE_RECV, i);
+      dpu_conn->qp.write_imm(IMM_D2H_RDMA, NULL, NULL, 0, 0, 0, 0);
 #endif
 
-    // Optimization: dont need to block
-    ibv_wc wc;
-    dpu_conn->qp.wait_send(&wc);
+      // Optimization: dont need to block
+      ibv_wc wc;
+      dpu_conn->qp.wait_send(&wc);
+    }
   }
 
   return processed > 0;

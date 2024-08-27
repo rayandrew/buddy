@@ -10,6 +10,7 @@ struct local_init {
   int32_t world_rank;
   int32_t world_size;
   int32_t local_dma;
+  int32_t host_recv_bufs;
 };
 
 const size_t DMA_SIZE_SEND = 64*1024;

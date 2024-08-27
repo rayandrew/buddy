@@ -30,7 +30,7 @@ class Proxy {
 #ifdef LOCAL_DMA
         dma::Engine *dma_engine,
 #endif
-        int *ranks);
+        int *ranks, int host_recv_bufs);
     ~Proxy();
     void rdma_loop();
 
@@ -54,7 +54,8 @@ class Proxy {
     ibv_mr *d2h_mr;
 #endif
     ReqBufWrite *d2h_bufs;
-    bool *client_recv_ready;
+    int *client_recv_ready;
+    int host_recv_bufs;
 
     void post_recv(uint64_t wr_id);
 

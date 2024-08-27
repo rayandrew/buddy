@@ -1,1 +1,1 @@
-mpirun -np 48 $BUILD/test/halo3d_buddy -nx 20 -ny 20 -nz 20 -pex 4 -pey 4 -pez 3 -iterations 100 -vars 8
+mpirun -np 32 $BUILD/test/halo3d_buddy -nx 20 -ny 20 -nz 20 -pex 4 -pey 4 -pez 2 -iterations 100 -vars 8

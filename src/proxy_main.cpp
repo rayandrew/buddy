@@ -19,6 +19,7 @@ int main(int argc, char **argv)
 
   int world_size = 0;
   int conn_count = 0;
+  int host_recv_bufs = 0;
   int *conn_list = NULL;
   int *ranks = NULL;
 
@@ -32,6 +33,12 @@ int main(int argc, char **argv)
     buddy::local_init msg;
     buddy::full_read(conn, (char*)&msg, sizeof(msg));
 
+#ifdef LOCAL_DMA
+    CHECK(msg.local_dma);
+#else
+    CHECK(!msg.local_dma);
+#endif
+
     if (!world_size) {
       world_size = msg.world_size;
       std::cout << "world size = " << msg.world_size << std::endl;
@@ -39,6 +46,12 @@ int main(int argc, char **argv)
       ranks = new int[world_size];
     } else
       CHECK(world_size == msg.world_size);
+
+    if (!host_recv_bufs) {
+      host_recv_bufs = msg.host_recv_bufs;
+      std::cout << "num host recv buffers = " << msg.host_recv_bufs << std::endl;
+    } else
+      CHECK(host_recv_bufs == msg.host_recv_bufs);
 
     CHECK(msg.world_rank < world_size);
 
@@ -66,7 +79,7 @@ int main(int argc, char **argv)
 #ifdef LOCAL_DMA
 		  &dma_engine,
 #endif
-		  ranks);
+		  ranks, host_recv_bufs);
 
   char x = 0;
   for (int i = 0; i < conn_count; i++) {
