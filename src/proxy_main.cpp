@@ -137,9 +137,10 @@ int main(int argc, char **argv)
 
   buddy::dpu::ProxyConfig config;
 
-  buddy::dpu::Proxy proxy(config, cqs, conn_count, world_size, local_qps, remote_qps.data(),
+  buddy::dpu::Proxy proxy(config, cqs, conn_count, remote_qps.size(), world_size,
+      local_qps, remote_qps.data(),
 #ifdef LOCAL_DMA
-		  &dma_engine,
+      &dma_engine,
 #endif
       ranks, host_recv_bufs, routing_table);
 
@@ -153,6 +154,7 @@ int main(int argc, char **argv)
   proxy.rdma_loop();
 
   delete[] local_qps;
+  remote_qps.clear();
   cqs.destroy();
 
   delete[] routing_table;

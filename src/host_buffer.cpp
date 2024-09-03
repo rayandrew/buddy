@@ -255,16 +255,14 @@ bool poll_recv()
 #ifdef LOCAL_DMA
       VALGRIND_MAKE_MEM_UNDEFINED(dma_buf->buf + DMA_OFFSET_RECV, DMA_SIZE_RECV);
       dpu_conn->qp.write_imm(IMM_D2H_DMA, NULL, NULL, 0, 0, 0, 0);
-#else
-
-      VALGRIND_MAKE_MEM_UNDEFINED((char *)recv_mr->addr + i*DMA_SIZE_RECV, DMA_SIZE_RECV);
-      dpu_conn->qp.recv(recv_mr, DMA_SIZE_RECV, i*DMA_SIZE_RECV, i);
-      dpu_conn->qp.write_imm(IMM_D2H_RDMA, NULL, NULL, 0, 0, 0, 0);
-#endif
 
       // Optimization: dont need to block
       ibv_wc wc;
       dpu_conn->qp.wait_send(&wc);
+#else
+      VALGRIND_MAKE_MEM_UNDEFINED((char *)recv_mr->addr + i*DMA_SIZE_RECV, DMA_SIZE_RECV);
+      dpu_conn->qp.recv(recv_mr, DMA_SIZE_RECV, i*DMA_SIZE_RECV, i);
+#endif
     }
   }
 

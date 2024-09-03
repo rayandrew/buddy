@@ -26,12 +26,15 @@ const size_t DMA_SIZE_TOTAL = DMA_SIZE_SEND + DMA_SIZE_RECV;
 
 const size_t RDMA_SIZE = 4096;
 
+const size_t D2D_SIZE = 64*1024*1024;
+
 enum rdma_imm {
   IMM_QUIT,
   IMM_H2D_DMA,
   IMM_D2H_DMA,
   IMM_H2D_RDMA,
   IMM_D2H_RDMA,
+  IMM_D2D_RDMA,
 };
 
 } // namespace buddy
