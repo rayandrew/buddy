@@ -9,6 +9,14 @@
 
 namespace buddy {
 
+int tcp_connect_ip(uint32_t ip, int port)
+{
+  struct in_addr ip_addr = { .s_addr = ip };
+  char *ip_str = inet_ntoa(ip_addr);
+  
+  return tcp_connect(ip_str, port);
+}
+
 int tcp_connect(const char *server_name, int port)
 {
   int sockfd = -1;

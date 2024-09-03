@@ -171,16 +171,16 @@ QP::QP(int connfd)
   setup_common(NULL, connfd);
 }
 
-QP::QP(server_cqs cqs, int connfd)
+QP::QP(server_cqs cqs, int connfd, bool inverse_server)
 {
   recv_cq = cqs.recv;
   send_cq = cqs.send;
   own_cqs = false;
 
-  setup_common(cqs.srq, connfd);
+  setup_common(cqs.srq, connfd, inverse_server);
 }
 
-void QP::setup_common(ibv_srq *srq, int connfd)
+void QP::setup_common(ibv_srq *srq, int connfd, bool inverse_server)
 {
   // Creates a Queue Pair:
   {
@@ -227,7 +227,7 @@ void QP::setup_common(ibv_srq *srq, int connfd)
   local_dest.qpn = qp->qp_num;
 
   // Exchange IBDest values
-  if (srq) {
+  if (srq && !inverse_server) {
     full_read(connfd, (char *)&remote_dest, sizeof(remote_dest));
     full_write(connfd, (char *)&local_dest, sizeof(local_dest));
   } else {

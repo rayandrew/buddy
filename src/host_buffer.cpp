@@ -24,7 +24,6 @@ int num_recv_bufs;
 ReqBufRead *recv_bufs;
 
 int world_rank;
-int world_size;
 
 DpuConn *dpu_conn;
 dma::Buffer *dma_buf;
@@ -50,7 +49,6 @@ void init()
   CHECK(recv_mr);
 
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
-  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
 
 #ifdef LOCAL_DMA
   dma_buf = new dma::Buffer(DMA_SIZE_TOTAL);
@@ -69,7 +67,7 @@ void init()
     new (&recv_bufs[i]) ReqBufRead((char *)recv_mr->addr + i*DMA_SIZE_RECV, 0);
 #endif
 
-  dpu_conn = new DpuConn(world_rank, world_size, dma_buf, num_recv_bufs);
+  dpu_conn = new DpuConn(world_rank, dma_buf, num_recv_bufs);
 
   for (int i = 0; i < num_recv_bufs; i++)
     dpu_conn->qp.recv(recv_mr, DMA_SIZE_RECV, i*DMA_SIZE_RECV, i);

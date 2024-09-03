@@ -5,12 +5,15 @@
 namespace buddy {
 
 const int LOCAL_PORT = 22838;
+const int REMOTE_PORT = 22839;
 
 struct local_init {
   int32_t world_rank;
   int32_t world_size;
+  int32_t local_size;
   int32_t local_dma;
   int32_t host_recv_bufs;
+  int32_t send_address_table;
 };
 
 const size_t DMA_SIZE_SEND = 64*1024*1024;

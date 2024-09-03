@@ -42,7 +42,7 @@ class QP {
   public:
     QP() = default;
     QP(int connfd);
-    QP(server_cqs cqs, int connfd);
+    QP(server_cqs cqs, int connfd, bool inverse_server = false);
     ~QP();
 
     void send(ibv_mr *mr, void *buf, unsigned len, uint64_t wr_id);
@@ -73,7 +73,7 @@ class QP {
     uint32_t max_inline_data = 0;
     bool own_cqs = false;
 
-    void setup_common(ibv_srq *srq, int connfd);
+    void setup_common(ibv_srq *srq, int connfd, bool inverse = false);
     void wait_cq(ibv_wc *wc, ibv_cq *cq);
     bool poll_cq(ibv_wc *wc, ibv_cq *cq);
 };

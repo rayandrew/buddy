@@ -8,7 +8,7 @@ namespace buddy::host {
 class DpuConn {
 
   public:
-    DpuConn(int world_rank, int world_size, dma::Buffer *dma_buf, int host_recv_bufs);
+    DpuConn(int world_rank, dma::Buffer *dma_buf, int host_recv_bufs);
     ~DpuConn();
     rdma::QP qp;
 };

@@ -22,16 +22,18 @@ Proxy::~Proxy()
   delete[] client_recv_ready;
 }
 
-Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
-    rdma::QP *qps,
+Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients, int world_size,
+    rdma::QP *local_qps, rdma::QP *remote_qps,
 #ifdef LOCAL_DMA
     dma::Engine *dma_engine,
 #endif
-    int *ranks, int host_recv_bufs)
+    int *ranks, int host_recv_bufs, route *routing_table)
   : config(config)
   , cqs(cqs)
   , num_clients(num_clients)
-  , qps(qps)
+  , world_size(world_size)
+  , local_qps(local_qps)
+  , remote_qps(remote_qps)
 #ifdef LOCAL_DMA
   , dma_engine(dma_engine)
 #endif
@@ -39,6 +41,7 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   , rx_depth(2*num_clients)
   , idx_to_rank(ranks)
   , host_recv_bufs(host_recv_bufs)
+  , routing_table(routing_table)
 {
   size_t total_size = PROXY_BUF_SIZE * rx_depth;
   char *h2d_buf = new char[total_size];
@@ -47,10 +50,7 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   CHECK(h2d_mr);
 
   for (unsigned i = 0; i < num_clients; i++)
-    qp_num_to_idx[qps[i].get_qp()->qp_num] = i;
-
-  for (unsigned i = 0; i < num_clients; i++)
-    rank_to_idx[ranks[i]] = i;
+    qp_num_to_idx[local_qps[i].get_qp()->qp_num] = i;
 
   std::cout << "ranks:";
   for (unsigned i = 0; i < num_clients; i++)
@@ -204,7 +204,7 @@ void Proxy::rdma_loop()
             CHECK(job.dir == dma::H2D);
 
             // Ack
-            qps[client_idx].write_imm(IMM_H2D_DMA);
+            local_qps[client_idx].write_imm(IMM_H2D_DMA);
 
             // Optimization: async
             char *src_buf = dma_engine->client_buf(client_idx) + DMA_OFFSET_SEND;
@@ -299,12 +299,18 @@ void Proxy::route_reqs(char *buf, size_t len)
   request_head *head;
   char *data;
   while (reader.next(&head, &data, -1)) {
-    unsigned dst_client = rank_to_idx[head->dst];
-    // Optimization: unnecessary to flush all buffers here
-    // Also, could be async?
-    while (!d2h_bufs[dst_client].append(*head, data))
-      if (!try_flush_local())
-        FAIL("recv buffer is full, but cannot be flushed!");
+    CHECK(head->dst >= 0 && head->dst < world_size);
+    route r = routing_table[head->dst];
+    if (r.remote) {
+      std::cout << "route remote " << r.idx << std::endl;
+    } else {
+      std::cout << "route local " << r.idx << std::endl;
+      // Optimization: unnecessary to flush all buffers here
+      // Also, could be async?
+      while (!d2h_bufs[r.idx].append(*head, data))
+        if (!try_flush_local())
+          FAIL("recv buffer is full, but cannot be flushed!");
+    }
   }
 }
 
@@ -342,9 +348,9 @@ bool Proxy::try_flush_local()
     CHECK(job.offset == DMA_OFFSET_RECV);
     CHECK(job.dir == dma::D2H);
 
-    qps[i].send_imm_inline(IMM_D2H_DMA, (char*)&size, sizeof(size));
+    local_qps[i].send_imm_inline(IMM_D2H_DMA, (char*)&size, sizeof(size));
 #else
-    qps[i].send_imm(IMM_D2H_RDMA, d2h_mr, size, i*DMA_SIZE_RECV);
+    local_qps[i].send_imm(IMM_D2H_RDMA, d2h_mr, size, i*DMA_SIZE_RECV);
 #endif
 
     d2h_bufs[i].reset_pos();
