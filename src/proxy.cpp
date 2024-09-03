@@ -110,11 +110,12 @@ void Proxy::harvest_wcs()
       if (wc[i].opcode & IBV_WC_RECV)
         FAIL("recv completion in send queue");
 
-      if (wc[i].imm_data == IMM_D2H_RDMA) {
-        assert(d2h_flushing[i]);
-        d2h_bufs[i].reset_pos();
-        d2h_flushing[i] = false;
-      }
+#ifndef LOCAL_DMA
+      uint64_t wr_id = wc[i].wr_id;
+      assert(d2h_flushing[wr_id]);
+      d2h_bufs[wr_id].reset_pos();
+      d2h_flushing[wr_id] = false;
+#endif
     }
   }
 }
