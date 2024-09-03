@@ -40,7 +40,7 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients, int
 #endif
   , quit(false)
   , rx_depth(2*num_clients)
-  , idx_to_rank(ranks)
+  , local_idx_to_rank(ranks)
   , host_recv_bufs(host_recv_bufs)
   , routing_table(routing_table)
 {
@@ -313,9 +313,9 @@ void Proxy::route_reqs(char *buf, size_t len)
     CHECK(head->dst >= 0 && head->dst < world_size);
     route r = routing_table[head->dst];
     if (r.remote) {
-      std::cout << "route remote " << r.idx << std::endl;
+      std::cout << "route remote dpu " << r.idx << ", for rank " << head->dst << std::endl;
     } else {
-      std::cout << "route local " << r.idx << std::endl;
+      std::cout << "route local idx " << r.idx << ", for rank " << head->dst << std::endl;
       // Optimization: unnecessary to flush all buffers here
       // Also, could be async?
       while (!d2h_bufs[r.idx].append(*head, data))

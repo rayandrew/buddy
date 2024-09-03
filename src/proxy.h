@@ -63,7 +63,7 @@ class Proxy {
 
     ibv_mr *h2d_mr;
     absl::flat_hash_map<unsigned, unsigned> qp_num_to_idx;
-    int *idx_to_rank;
+    int *local_idx_to_rank;
 
 #ifndef LOCAL_DMA
     ibv_mr *d2h_mr;
