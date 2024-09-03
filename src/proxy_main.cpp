@@ -129,6 +129,7 @@ int main(int argc, char **argv)
   close(remote_lsock);
 
   delete[] address_table;
+  address_table = nullptr;
 
 #ifdef LOCAL_DMA
   buddy::dma::Engine dma_engine(conn_count, conn_list);
@@ -154,5 +155,5 @@ int main(int argc, char **argv)
   delete[] local_qps;
   cqs.destroy();
 
-  delete[] address_table;
+  delete[] routing_table;
 }
