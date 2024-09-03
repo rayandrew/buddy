@@ -70,6 +70,7 @@ class Proxy {
 #endif
     ReqBufWrite *d2h_bufs;
     int *client_recv_ready;
+    std::atomic_bool *d2h_flushing;
     int host_recv_bufs;
 
     route *routing_table;

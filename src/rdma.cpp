@@ -302,10 +302,10 @@ QP::~QP()
   recv_cq = NULL;
 }
 
-void QP::send_imm(uint32_t tag, ibv_mr *mr, unsigned len, unsigned offset)
+void QP::send_imm(uint32_t tag, ibv_mr *mr, unsigned len, unsigned offset, uint64_t wr_id)
 {
   if (len <= max_inline_data) {
-    send_imm_inline(tag, mr->addr, len, offset);
+    send_imm_inline(tag, mr->addr, len, offset, wr_id);
     return;
   }
 
@@ -318,6 +318,7 @@ void QP::send_imm(uint32_t tag, ibv_mr *mr, unsigned len, unsigned offset)
   struct ibv_send_wr *bad_wr;
 
   struct ibv_send_wr wr = {
+    .wr_id = wr_id,
     .sg_list = &list,
     .num_sge = 1,
     .opcode = IBV_WR_SEND_WITH_IMM,
@@ -330,7 +331,7 @@ void QP::send_imm(uint32_t tag, ibv_mr *mr, unsigned len, unsigned offset)
     FAIL("Failed to ibv_post_send: " << strerror(err));
 }
 
-void QP::send_imm_inline(uint32_t tag, void *buf, unsigned len, unsigned offset)
+void QP::send_imm_inline(uint32_t tag, void *buf, unsigned len, unsigned offset, uint64_t wr_id)
 {
   if (len > max_inline_data) {
     FAIL("above max inline size " << len << " > " << max_inline_data);
@@ -344,6 +345,7 @@ void QP::send_imm_inline(uint32_t tag, void *buf, unsigned len, unsigned offset)
   struct ibv_send_wr *bad_wr;
 
   struct ibv_send_wr wr = {
+    .wr_id = wr_id,
     .sg_list = &list,
     .num_sge = !!len,
     .opcode = IBV_WR_SEND_WITH_IMM,

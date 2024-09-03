@@ -19,6 +19,7 @@ Proxy::~Proxy()
   delete[] buf;
 #endif
 
+  delete[] d2h_flushing;
   delete[] client_recv_ready;
 }
 
@@ -75,6 +76,10 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients, int
 
   for (unsigned i = 0; i < num_clients; i++)
     new (&d2h_bufs[i]) ReqBufWrite(bufs + i*DMA_SIZE_RECV, DMA_SIZE_RECV);
+
+  d2h_flushing = new std::atomic_bool[num_clients];
+  for (unsigned i = 0; i < num_clients; i++)
+    d2h_flushing[i] = false;
 #endif
 
   client_recv_ready = new int[num_clients];
@@ -104,6 +109,12 @@ void Proxy::harvest_wcs()
 
       if (wc[i].opcode & IBV_WC_RECV)
         FAIL("recv completion in send queue");
+
+      if (wc[i].imm_data == IMM_D2H_RDMA) {
+        assert(d2h_flushing[i]);
+        d2h_bufs[i].reset_pos();
+        d2h_flushing[i] = false;
+      }
     }
   }
 }
@@ -320,7 +331,7 @@ bool Proxy::try_flush_local()
 
   // Optimization: queue up all transfers at once
   for (unsigned i = 0; i < num_clients; i++) {
-    if (d2h_bufs[i].empty())
+    if (d2h_bufs[i].empty() || d2h_flushing[i])
       continue;
 
     if (!client_recv_ready[i]) {
@@ -349,11 +360,11 @@ bool Proxy::try_flush_local()
     CHECK(job.dir == dma::D2H);
 
     local_qps[i].send_imm_inline(IMM_D2H_DMA, (char*)&size, sizeof(size));
-#else
-    local_qps[i].send_imm(IMM_D2H_RDMA, d2h_mr, size, i*DMA_SIZE_RECV);
-#endif
-
     d2h_bufs[i].reset_pos();
+#else
+    local_qps[i].send_imm(IMM_D2H_RDMA, d2h_mr, size, i*DMA_SIZE_RECV, i);
+    d2h_flushing[i] = true;
+#endif
   }
 
   return all_flushed;
