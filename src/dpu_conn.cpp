@@ -28,7 +28,7 @@ uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, int wor
   CHECK(dpu_ent->h_length == sizeof(dpu_ip));
   memcpy(&dpu_ip, *dpu_ent->h_addr_list, sizeof(dpu_ip));
 
-  CHECK_MPI(MPI_Gather(&dpu_ip, sizeof(dpu_ip), MPI_BYTE, table, sizeof(dpu_ip)*world_size, MPI_BYTE, 0, MPI_COMM_WORLD));
+  CHECK_MPI(MPI_Gather(&dpu_ip, sizeof(dpu_ip), MPI_BYTE, table, sizeof(dpu_ip), MPI_BYTE, 0, MPI_COMM_WORLD));
   CHECK_MPI(MPI_Bcast(table, sizeof(dpu_ip)*world_size, MPI_BYTE, 0, leader_comm));
 
   return table;
