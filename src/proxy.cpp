@@ -113,8 +113,13 @@ void Proxy::harvest_wcs()
     }
 
     for (int i = 0; i < n; i++) {
-      if (wc[i].status != IBV_WC_SUCCESS)
-        FAIL("unsuccessful status " << wc[i].status << " (vendor_err " << wc[i].vendor_err << ")");
+      if (wc[i].status != IBV_WC_SUCCESS) {
+        std::cerr << "wc status " << wc[i].status << ": " << ibv_wc_status_str(wc[i].status) << std::endl;
+        std::cerr << "vendor_err " << wc[i].vendor_err << std::endl;
+        if (wc[i].status == IBV_WC_RNR_RETRY_EXC_ERR)
+          std::cerr << "Maybe the host ran out of receive buffers, try increasing BUDDY_RECV_BUFS." << std::endl;
+        FAIL("wc error");
+      }
 
       if (wc[i].opcode & IBV_WC_RECV)
         FAIL("recv completion in send queue");
