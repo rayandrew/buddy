@@ -16,6 +16,7 @@
 namespace buddy::dpu {
 
 struct ProxyConfig {
+  bool trace = false;
 };
 
 struct route {

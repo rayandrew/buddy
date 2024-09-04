@@ -136,6 +136,10 @@ int main(int argc, char **argv)
 #endif
 
   buddy::dpu::ProxyConfig config;
+  char *env;
+  env = getenv("BUDDY_TRACE");
+  if (env)
+    config.trace = atoi(env);
 
   buddy::dpu::Proxy proxy(config, cqs, conn_count, remote_qps.size(), world_size,
       local_qps, remote_qps.data(),

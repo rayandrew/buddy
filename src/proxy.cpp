@@ -4,6 +4,8 @@
 #include "local_proto.h"
 #include "valgrind/memcheck.h"
 
+#define TRACE(x) do{if (config.trace){std::clog << x << std::endl;}}while(0)
+
 namespace buddy::dpu {
 
 Proxy::~Proxy()
@@ -258,6 +260,7 @@ void Proxy::rdma_loop()
 
         case IMM_H2D_RDMA:
           {
+            TRACE("recv H2D_RDMA size " << msglen);
             route_reqs(recv_buf, msglen);
             pending_flush = true;
             break;
@@ -265,6 +268,7 @@ void Proxy::rdma_loop()
 
         case IMM_D2D_RDMA:
           {
+            TRACE("recv D2D_RDMA size " << msglen);
             route_reqs(recv_buf, msglen);
             pending_flush = true;
             break;
@@ -330,12 +334,16 @@ void Proxy::route_reqs(char *buf, size_t len)
     CHECK(head->dst >= 0 && head->dst < world_size);
     route r = routing_table[head->dst];
     if (r.remote) {
+      TRACE("route to " << head->dst << " (remote " << r.idx << ")");
+      while (d2d_send.is_flushing(r.idx));
       while (!d2d_send.reqs(r.idx).append(*head, data))
         if (!flush_remote(r.idx))
           FAIL("remote send buf is full but cannot be flushed!");
     } else {
+      TRACE("route to " << head->dst << " (local " << r.idx << ")");
       // Optimization: unnecessary to flush all buffers here
       // Also, could be async?
+      while (d2h_flushing[r.idx]);
       while (!d2h_reqs[r.idx].append(*head, data))
         if (!flush_local(r.idx))
           FAIL("recv buffer is full, but cannot be flushed!");
@@ -345,11 +353,12 @@ void Proxy::route_reqs(char *buf, size_t len)
 
 bool Proxy::flush_remote(unsigned idx)
 {
-  if (d2d_send.is_flushing(idx))
+  if (d2d_send.reqs(idx).empty() || d2d_send.is_flushing(idx))
     return true;
 
   d2d_send.set_flushing(idx, true);
 
+  TRACE("send to remote " << idx);
   remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send.mr(),
       d2d_send.reqs(idx).get_pos(), d2d_send.offset(idx),
       route::make_remote(idx).as_int());
@@ -404,8 +413,10 @@ bool Proxy::flush_local(unsigned idx)
   local_qps[idx].send_imm_inline(IMM_D2H_DMA, (char*)&size, sizeof(size));
   d2h_reqs[idx].reset_pos();
 #else
-  local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_mr, size, idx*DMA_SIZE_RECV, route::make_local(idx).as_int());
+  assert(!d2h_flushing[idx]);
   d2h_flushing[idx] = true;
+  TRACE("send to local rank " << local_idx_to_rank[idx]);
+  local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_mr, size, idx*DMA_SIZE_RECV, route::make_local(idx).as_int());
 #endif
 
   return true;
