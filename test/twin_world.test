@@ -1,0 +1,1 @@
+mpirun -H intel01:8,intel02:8 $BUILD/test/around-the-world_buddy 1000 100

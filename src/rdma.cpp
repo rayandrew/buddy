@@ -8,7 +8,11 @@
 #define IB_PORT 1
 #define GID_INDEX 0
 #define COUNT 1000
-#define MTU IBV_MTU_4096
+
+// TODO: This needs be less than the link MTU. Currently on Sleipner it is 1500
+// but we should consider increasing it to 5000.
+//#define MTU IBV_MTU_4096
+#define MTU IBV_MTU_1024
 
 namespace buddy::rdma {
 

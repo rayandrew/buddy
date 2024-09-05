@@ -1,0 +1,1 @@
+BUDDY_RECV_BUFS=30 mpirun -H intel01:16,intel02:16 $BUILD/test/halo3d_buddy -nx 20 -ny 20 -nz 20 -pex 4 -pey 4 -pez 2 -iterations 100 -vars 8

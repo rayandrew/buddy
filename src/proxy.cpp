@@ -116,6 +116,15 @@ void Proxy::harvest_wcs()
       if (wc[i].status != IBV_WC_SUCCESS) {
         std::cerr << "wc status " << wc[i].status << ": " << ibv_wc_status_str(wc[i].status) << std::endl;
         std::cerr << "vendor_err " << wc[i].vendor_err << std::endl;
+
+        for (unsigned idx = 0; idx < num_clients; idx++)
+          if (local_qps[idx].get_qp()->qp_num == wc[i].qp_num)
+            std::cerr << "destination: rank " << local_idx_to_rank[idx] << " (local idx " << idx << ")" << std::endl;
+
+        for (unsigned idx = 0; idx < num_remotes; idx++)
+          if (remote_qps[idx].get_qp()->qp_num == wc[i].qp_num)
+            std::cerr << "destination: remote dpu " << idx << std::endl;
+
         if (wc[i].status == IBV_WC_RNR_RETRY_EXC_ERR)
           std::cerr << "Maybe the host ran out of receive buffers, try increasing BUDDY_RECV_BUFS." << std::endl;
         FAIL("wc error");
@@ -363,9 +372,10 @@ bool Proxy::flush_remote(unsigned idx)
 
   d2d_send.set_flushing(idx, true);
 
-  TRACE("send to remote " << idx);
+  size_t size = d2d_send.reqs(idx).get_pos();
+  TRACE("send to remote " << idx << " size " << size);
   remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send.mr(),
-      d2d_send.reqs(idx).get_pos(), d2d_send.offset(idx),
+      size, d2d_send.offset(idx),
       route::make_remote(idx).as_int());
 
   return true;
@@ -420,7 +430,7 @@ bool Proxy::flush_local(unsigned idx)
 #else
   assert(!d2h_flushing[idx]);
   d2h_flushing[idx] = true;
-  TRACE("send to local rank " << local_idx_to_rank[idx]);
+  TRACE("send to local rank " << local_idx_to_rank[idx] << " size " << size);
   local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_mr, size, idx*DMA_SIZE_RECV, route::make_local(idx).as_int());
 #endif
 
