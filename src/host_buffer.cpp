@@ -199,13 +199,8 @@ void flush()
   assert(!hold_send_buf);
 }
 
-static bool try_recv(request_head *head, char *data)
+static bool try_recv_from_list(request_head *head, char *data, std::list<request>& list)
 {
-  auto it = recv_map.find({head->src, head->tag});
-  if (it == recv_map.end())
-    return false;
-
-  auto& list = it->second;
   assert(list.size());
 
   for (auto& req: list) {
@@ -217,6 +212,25 @@ static bool try_recv(request_head *head, char *data)
     req.head.dst = !world_rank;
 
     return true;
+  }
+
+  return false;
+}
+
+static bool try_recv(request_head *head, char *data)
+{
+  recv_key keys[] = {
+    {head->src, head->tag},
+    {MPI_ANY_SOURCE, MPI_ANY_TAG},
+    {MPI_ANY_SOURCE, head->tag},
+    {head->src, MPI_ANY_TAG},
+  };
+
+  for (size_t i = 0; i < sizeof(keys)/sizeof(*keys); i++) {
+    auto it = recv_map.find(keys[i]);
+    if (it != recv_map.end())
+      if (try_recv_from_list(head, data, it->second))
+        return true;
   }
 
   return false;

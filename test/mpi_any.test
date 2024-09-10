@@ -1,0 +1,1 @@
+mpirun -np 2 $BUILD/test/mpi_any_buddy

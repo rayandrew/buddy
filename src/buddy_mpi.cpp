@@ -50,9 +50,6 @@ int MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source, int tag,
   CHECK(ds >= 0);
   CHECK(count >= 0);
 
-  CHECK(source != MPI_ANY_SOURCE);
-  CHECK(tag != MPI_ANY_TAG);
-
   buddy::request_head head = {
     .size = (size_t)ds*count,
     .src = source,
