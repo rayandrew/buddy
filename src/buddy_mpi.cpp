@@ -90,6 +90,20 @@ int MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int t
   return 0;
 }
 
+int MPI_Get_count(MPI_Status *status, MPI_Datatype datatype, int *count)
+{
+  int ds = -1;
+  CHECK_MPI(PMPI_Type_size(datatype, &ds));
+  CHECK(ds >= 0);
+
+  if (status->_ucount % ds)
+    *count = MPI_UNDEFINED;
+  else
+    *count = status->_ucount / ds;
+
+  return 0;
+}
+
 int MPI_Test(MPI_Request *mpi_req, int *flag, MPI_Status *status)
 {
   if (*mpi_req == MPI_REQUEST_NULL) {
@@ -118,6 +132,7 @@ int MPI_Test(MPI_Request *mpi_req, int *flag, MPI_Status *status)
     status->MPI_SOURCE = handle->real_src;
     status->MPI_TAG = handle->real_tag;
     status->MPI_ERROR = MPI_SUCCESS;
+    status->_ucount = handle->real_size;
   }
 
   buddy::host::complete_recv(handle);
@@ -146,6 +161,7 @@ int MPI_Wait(MPI_Request *mpi_req, MPI_Status *status)
     status->MPI_SOURCE = handle->real_src;
     status->MPI_TAG = handle->real_tag;
     status->MPI_ERROR = MPI_SUCCESS;
+    status->_ucount = handle->real_size;
   }
 
   buddy::host::complete_recv(handle);
