@@ -189,11 +189,10 @@ int main(int argc, char **argv)
       auto args = line["args"];
       auto tid = line["tid"].template get<std::string>();
       if (!tid.compare("barrier")) {
-        MPI_Barrier(MPI_COMM_WORLD);
-
         auto trace_send = std::stoi(args["m_send_count"].template get<std::string>());
         auto trace_recv = std::stoi(args["m_recv_count"].template get<std::string>());
 
+        std::cout << "rank " << rank << " barrier id " << line["id"].template get<std::string>() << std::endl;
         tracer.trace_barrier(trace_send, trace_recv);
       } else if (!tid.compare("send")) {
         // TODO count

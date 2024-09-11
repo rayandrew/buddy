@@ -31,7 +31,22 @@ dma::Buffer *dma_buf;
 ibv_mr *recv_mr;
 ibv_mr *send_mr;
 
-absl::flat_hash_map<recv_key, std::list<request>> recv_map;
+absl::flat_hash_map<recv_key, std::list<pending_recv>> pending_recv_map;
+
+int trace;
+#define TRACE(l,x) do{if (trace>=(l)){std::clog << x << std::endl;}}while(0)
+
+std::ostream& operator<<(std::ostream& os, request_head& head)
+{
+  os << "(from:" << head.src << " to:" << head.dst << " tag:" << head.tag << " size:" << head.size << ")";
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, pending_recv& pr)
+{
+  os << "(size:" << pr.size << " src:" << pr.src << " tag:" << pr.tag << " real_size:" << pr.real_size << "real_src:" << pr.real_src << " real_tag:" << pr.real_tag << ")";
+  return os;
+}
 
 void init()
 {
@@ -42,6 +57,10 @@ void init()
     num_recv_bufs = atoi(env);
   if (!num_recv_bufs)
     num_recv_bufs = 2;
+
+  env = getenv("BUDDY_TRACE");
+  if (env)
+    trace = atoi(env);
 
   char *rdma_recv_buf = new char[num_recv_bufs*DMA_SIZE_RECV];
   recv_mr = ibv_reg_mr(rdma::Context::get().get_pd(), rdma_recv_buf, num_recv_bufs*DMA_SIZE_RECV,
@@ -99,6 +118,8 @@ void finalize()
 
 void put_send(request_head head, const char *data)
 {
+  TRACE(2, "put_send " << head);
+
   while (!send_buf.append(head, data))
     flush();
 }
@@ -150,6 +171,8 @@ static bool poll_rdma_recv()
         recv_bufs[wc.wr_id].reset_len(size);
         VALGRIND_MAKE_MEM_DEFINED((char *)recv_mr->addr + wc.wr_id*DMA_SIZE_RECV, size);
 
+        TRACE(1, "d2h size " << size);
+
         break;
       }
 
@@ -181,6 +204,8 @@ void flush()
   dpu_conn->qp.send_imm(IMM_H2D_RDMA, send_mr, size);
 #endif
 
+  TRACE(1, "flush size " << size);
+
   ibv_wc wc;
   dpu_conn->qp.wait_send(&wc);
 
@@ -199,17 +224,22 @@ void flush()
   assert(!hold_send_buf);
 }
 
-static bool try_recv_from_list(request_head *head, char *data, std::list<request>& list)
+static bool try_recv_from_list(request_head *head, char *data, std::list<pending_recv>& list)
 {
   assert(list.size());
 
   for (auto& req: list) {
-    if (req.head.dst != world_rank)
+    if (req.completed())
       continue;
 
-    CHECK(req.head.size <= head->size);
+    CHECK(req.size >= head->size);
     memcpy(req.buf, data, head->size);
-    req.head.dst = !world_rank;
+
+    assert(head->src >= 0);
+    assert(head->tag >= 0);
+
+    req.real_src = head->src;
+    req.real_tag = head->tag;
 
     return true;
   }
@@ -227,8 +257,8 @@ static bool try_recv(request_head *head, char *data)
   };
 
   for (size_t i = 0; i < sizeof(keys)/sizeof(*keys); i++) {
-    auto it = recv_map.find(keys[i]);
-    if (it != recv_map.end())
+    auto it = pending_recv_map.find(keys[i]);
+    if (it != pending_recv_map.end())
       if (try_recv_from_list(head, data, it->second))
         return true;
   }
@@ -285,26 +315,29 @@ bool poll_recv()
 
 recv_handle put_recv(request_head head, void *buf)
 {
+  TRACE(2, "put_recv " << head);
+
   recv_key key = {head.src, head.tag};
-  auto it = recv_map.try_emplace(key);
+  auto it = pending_recv_map.try_emplace(key);
   auto& list = it.first->second;
 
-  request req = { .head = head, .buf = buf};
-  list.push_back(req);
+  list.emplace_back(head, buf);
 
   return --list.end();
 }
 
-void delete_recv(recv_handle handle)
+void complete_recv(recv_handle handle)
 {
-  auto list_it = recv_map.find({handle->head.src, handle->head.tag});
-  assert(list_it != recv_map.end());
-  auto& list = list_it->second;
+  TRACE(2, "complete_recv " << *handle);
 
+  auto list_it = pending_recv_map.find({handle->src, handle->tag});
+  assert(list_it != pending_recv_map.end());
+
+  auto& list = list_it->second;
   list.erase(handle);
 
   if (list.empty())
-    recv_map.erase(list_it);
+    pending_recv_map.erase(list_it);
 }
 
 } // namespace buddy::host

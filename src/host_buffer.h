@@ -6,9 +6,23 @@
 
 namespace buddy::host {
 
-struct request {
-  request_head head;
+struct pending_recv {
   void *buf;
+  size_t size;
+  int src;
+  int tag;
+  size_t real_size = 0;
+  int real_src = -1;
+  int real_tag = -1;
+
+  pending_recv(request_head head, void *buf)
+    : buf(buf)
+    , size(head.size)
+    , src(head.src)
+    , tag(head.tag)
+  {}
+
+  inline bool completed() { return real_src >= 0; }
 };
 
 struct recv_key {
@@ -27,7 +41,7 @@ struct recv_key {
   }
 };
 
-typedef std::list<request>::iterator recv_handle;
+typedef std::list<pending_recv>::iterator recv_handle;
 
 void init();
 void finalize();
@@ -35,6 +49,6 @@ void flush();
 void put_send(request_head head, const char *data);
 recv_handle put_recv(request_head head, void *buf);
 bool poll_recv();
-void delete_recv(recv_handle req_it);
+void complete_recv(recv_handle req_it);
 
 } // namespace buddy::host

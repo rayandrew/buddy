@@ -377,7 +377,9 @@ void QP::wait_cq(ibv_wc *wc, ibv_cq *cq)
   CHECK(n > 0);
 
   if (wc->status != IBV_WC_SUCCESS) {
-    FAIL("unsuccessful status " << wc->status << " (vendor_err " << wc->vendor_err << ")");
+    std::cerr << "wc status " << wc->status << ": " << ibv_wc_status_str(wc->status) << std::endl;
+    std::cerr << "vendor_err " << wc->vendor_err << std::endl;
+    FAIL("wc error");
   }
 }
 

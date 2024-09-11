@@ -75,6 +75,7 @@ int MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int t
 
   CHECK(count >= 0);
   CHECK(ds >= 0);
+  CHECK(tag >= 0);
 
   buddy::request_head head = {
     .size = (size_t)ds*count,
@@ -89,6 +90,44 @@ int MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int t
   return 0;
 }
 
+int MPI_Test(MPI_Request *mpi_req, int *flag, MPI_Status *status)
+{
+  if (*mpi_req == MPI_REQUEST_NULL) {
+    *flag = 1;
+    return 0;
+  }
+
+  auto handle = *reinterpret_cast<buddy::host::recv_handle*>(mpi_req);
+
+  if (!handle->completed()) {
+    // Try to make progress.. not sure what we want to happen here actually.
+    //if (!buddy::host::poll_recv())
+      //buddy::host::flush();
+    buddy::host::poll_recv();
+
+    if (!handle->completed()) {
+      *flag = 0;
+      return 0;
+    }
+  }
+
+  assert(handle->real_src >= 0);
+  assert(handle->real_tag >= 0);
+
+  if (status != MPI_STATUS_IGNORE) {
+    status->MPI_SOURCE = handle->real_src;
+    status->MPI_TAG = handle->real_tag;
+    status->MPI_ERROR = MPI_SUCCESS;
+  }
+
+  buddy::host::complete_recv(handle);
+
+  *mpi_req = MPI_REQUEST_NULL;
+  *flag = 1;
+
+  return 0;
+}
+
 int MPI_Wait(MPI_Request *mpi_req, MPI_Status *status)
 {
   if (*mpi_req == MPI_REQUEST_NULL)
@@ -96,18 +135,20 @@ int MPI_Wait(MPI_Request *mpi_req, MPI_Status *status)
 
   auto handle = *reinterpret_cast<buddy::host::recv_handle*>(mpi_req);
 
-  // dst field indicates if request is completed
-  while (handle->head.dst == world_rank)
+  while (!handle->completed())
     while (!buddy::host::poll_recv())
       buddy::host::flush();
 
+  assert(handle->real_src >= 0);
+  assert(handle->real_tag >= 0);
+
   if (status != MPI_STATUS_IGNORE) {
-    status->MPI_SOURCE = handle->head.src;
-    status->MPI_TAG = handle->head.tag;
+    status->MPI_SOURCE = handle->real_src;
+    status->MPI_TAG = handle->real_tag;
     status->MPI_ERROR = MPI_SUCCESS;
   }
 
-  buddy::host::delete_recv(handle);
+  buddy::host::complete_recv(handle);
 
   *mpi_req = MPI_REQUEST_NULL;
 
