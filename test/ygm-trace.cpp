@@ -2,8 +2,11 @@
 #include <fstream>
 #include <cstring>
 #include <mpi.h>
-#include "util_mpi.h"
 #include "json.hpp"
+#include "buddy.h"
+#include "util.h"
+#include "util_mpi.h"
+#include "request.h"
 
 
 #include <unistd.h>
@@ -26,93 +29,144 @@ struct recv_meta {
 };
 
 const size_t MAXLEN = 1*1024*1024;
+enum {
+  ID_SEND,
+  ID_RECV,
+};
 
-class Tracer {
+class TracePlayer {
   public:
-    Tracer(int rank)
+    TracePlayer(int rank)
       : rank(rank)
     {
-      send_buf = new char[MAXLEN];
-      recv_buf = new char[MAXLEN];
+      send_buf = buddy_alloc(MAXLEN);
+      recv_buf = buddy_alloc(MAXLEN);
 
-      memset(send_buf, 0, MAXLEN);
-      memset(recv_buf, 0, MAXLEN);
+      writer = buddy::ReqBufWrite((char *)send_buf->addr, MAXLEN);
 
-      start_recv();
+      //memset(send_buf, 0, MAXLEN);
+      //memset(recv_buf, 0, MAXLEN);
+
+      buddy_recv(recv_buf, MAXLEN, 0, ID_RECV);
     }
 
-    void start_recv()
+    ~TracePlayer()
     {
-      CHECK_MPI(MPI_Irecv(recv_buf, MAXLEN, MPI_BYTE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &recv_req));
+      buddy_free(send_buf);
+      buddy_free(recv_buf);
     }
 
-    bool poll_recv()
+    bool poll()
     {
-      MPI_Status stat = {};
-      int flag;
-      CHECK_MPI(MPI_Test(&recv_req, &flag, &stat));
+      uint64_t ids[2];
+      size_t sizes[2];
 
-      if (!flag)
-        return false;
+      int n = buddy_poll(ids, sizes, 2);
+      for (int i = 0; i < n; i++) {
+        if (ids[i] == ID_SEND) {
+          CHECK(send_block);
+          writer.reset_pos();
+          send_block = false;
+        } else if (ids[i] == ID_RECV) {
+          process_recv_buf(sizes[i]);
+          buddy_recv(recv_buf, MAXLEN, 0, ID_RECV);
+        } else {
+          CHECK(false);
+        }
+      }
 
-      start_recv();
-      actual_recv_count++;
-
-      int count;
-      CHECK_MPI(MPI_Get_count(&stat, MPI_BYTE, &count));
-
-      CHECK(stat.MPI_SOURCE >= 0);
-
-      actual_recv.push_back({.count = count, .source = stat.MPI_SOURCE});
-
-      return true;
+      return n > 0;
     }
 
-    void trace_send(int source, int dest, int count)
+    void process_recv_buf(size_t len)
     {
-        CHECK(source == rank);
+      buddy::ReqBufRead reader((char *)recv_buf->addr, len);
+      buddy::request_head *head;
+      char *data;
 
-        MPI_Request req;
-        CHECK_MPI(MPI_Isend(send_buf, count, MPI_BYTE, dest, 0, MPI_COMM_WORLD, &req));
-        CHECK_MPI(MPI_Wait(&req, MPI_STATUS_IGNORE));
-        actual_send_count++;
+      while (reader.next(&head, &data, -1)) {
+        CHECK(head->dst == rank);
+        actual_recv_count++;
+        actual_recv.push_back({.count = head->size, .source = head->src});
+      }
     }
 
-    void trace_recv(int source, int dest, int count)
+    void flush()
+    {
+      if (writer.empty())
+        return;
+
+      send_block = true;
+      buddy_send(send_buf, writer.get_pos(), 0, ID_SEND);
+    }
+
+    void play_send(int source, int dest, int count)
+    {
+      CHECK(source == rank);
+
+      buddy::request_head head = {
+        .size = count,
+        .src = source,
+        .dst = dest,
+      };
+
+      while (send_block)
+        poll();
+
+      char *data = writer.append_head(head);
+      if (!data) {
+        flush();
+        while (!poll() && !(data = writer.append_head(head)));
+      }
+      memset(data, 0xcc, count);
+      actual_send_count++;
+    }
+
+    void play_recv(int source, int dest, int count)
     {
         CHECK(dest == rank);
         recv_meta r = {.count = count, .source = source};
         expect_recv.push_back(r);
     }
 
-    void trace_barrier(int send_count, int recv_count)
+    void ygm_barrier()
     {
-        if (send_count != actual_send_count) {
-          std::cerr << "wrong send count. expected " << send_count << " but got " << actual_send_count << std::endl;
-          abort();
-        }
+      flush();
 
-        MPI_Barrier(MPI_COMM_WORLD);
+      for (;;) {
+        while (poll());
 
-        // Do we need a timeout?
-        sleep(1);
-        while (poll_recv());
+        uint64_t local_counts[2] = {actual_send_count, actual_recv_count};
+        uint64_t global_counts[2] = {};
 
-        if (recv_count != actual_recv_count) {
-          std::cerr << "wrong recv count. expected " << recv_count << " but got " << actual_recv_count << std::endl;
-          abort();
-        }
+        CHECK_MPI(MPI_Allreduce(local_counts, global_counts, 2, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD));
+        if (global_counts[0] == global_counts[1])
+          break;
+      } 
+    }
 
-        check_recvs();
+    void play_barrier(int send_count, int recv_count)
+    {
+      if (send_count != actual_send_count) {
+        std::cerr << "wrong send count. expected " << send_count << " but got " << actual_send_count << std::endl;
+        abort();
+      }
 
-        MPI_Barrier(MPI_COMM_WORLD);
+      ygm_barrier();
+
+      if (recv_count != actual_recv_count) {
+        std::cerr << "wrong recv count. expected " << recv_count << " but got " << actual_recv_count << std::endl;
+        abort();
+      }
+
+      check_recvs();
     }
 
     void check_recvs()
     {
       if (expect_recv.size() != actual_recv.size()) {
-          std::cerr << "wrong recvs. expect list size is " << expect_recv.size() << " but actual list size is " << actual_recv.size() << std::endl;
-          abort();
+        std::cerr << "wrong recvs. expect list size is " << expect_recv.size() << " but actual list size is " << actual_recv.size() << std::endl;
+        abort();
       }
 
       std::sort(expect_recv.begin(), expect_recv.end());
@@ -132,8 +186,8 @@ class Tracer {
 
     void finalize()
     {
-        while (poll_recv());
-        check_recvs();
+      ygm_barrier();
+      check_recvs();
     }
 
   private:
@@ -142,10 +196,11 @@ class Tracer {
     std::vector<recv_meta> expect_recv;
     std::vector<recv_meta> actual_recv;
 
-    char *send_buf;
-    char *recv_buf;
+    buddy_buf *send_buf;
+    buddy_buf *recv_buf;
 
-    MPI_Request recv_req;
+    bool send_block = false;
+    buddy::ReqBufWrite writer;
 
     int actual_send_count = 0;
     int actual_recv_count = 0;
@@ -155,9 +210,9 @@ int main(int argc, char **argv)
 {
   CHECK_MPI(MPI_Init(&argc, &argv));
 
-  int rank, size;
+  int rank, num_ranks;
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
-  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &size));
+  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &num_ranks));
 
   int status = 0;
 
@@ -166,6 +221,8 @@ int main(int argc, char **argv)
       std::cerr << "usage: ygm-trace filename" << std::endl;
     status = 1;
   } else {
+    buddy_init(MPI_COMM_WORLD);
+
     /*
     if (rank == 0) {
       std::cout << "pid: " << getpid() << std::endl;
@@ -176,7 +233,7 @@ int main(int argc, char **argv)
     std::ifstream ifs(argv[1]);
     json jtrace = json::parse(ifs);
 
-    Tracer tracer(rank);
+    TracePlayer player(rank);
 
     int lineno = 0;
     for (auto& line: jtrace) {
@@ -193,7 +250,7 @@ int main(int argc, char **argv)
         auto trace_recv = std::stoi(args["m_recv_count"].template get<std::string>());
 
         std::cout << "rank " << rank << " barrier id " << line["id"].template get<std::string>() << std::endl;
-        tracer.trace_barrier(trace_send, trace_recv);
+        player.play_barrier(trace_send, trace_recv);
       } else if (!tid.compare("send")) {
         // TODO count
         //int count = std::stoi(args["message_size"].template get<std::string>());
@@ -201,25 +258,24 @@ int main(int argc, char **argv)
         int dest = std::stoi(args["to"].template get<std::string>());
         int source = std::stoi(args["from"].template get<std::string>());
 
-        tracer.trace_send(source, dest, count);
+        player.play_send(source, dest, count);
       } else if (!tid.compare("receive")) {
         //int count = std::stoi(args["message_size"].template get<std::string>());
         int count = 0;
         int dest = std::stoi(args["to"].template get<std::string>());
         int source = std::stoi(args["from"].template get<std::string>());
 
-        tracer.trace_recv(source, dest, count);
+        player.play_recv(source, dest, count);
       } else {
         std::cerr << "unknown tid " << tid << std::endl;
         return 1;
       }
-
-      while (tracer.poll_recv());
     }
 
-    tracer.finalize();
+    player.finalize();
   }
 
+  buddy_finalize();
   CHECK_MPI(MPI_Finalize());
 
   if (rank == 0 && status == 0)

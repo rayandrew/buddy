@@ -87,7 +87,7 @@ class Proxy {
 #ifdef LOCAL_DMA
         dma::Engine *dma_engine,
 #endif
-        int *ranks, int host_recv_bufs, route *routing_table);
+        int *ranks, route *routing_table);
     ~Proxy();
     void rdma_loop();
 
@@ -116,7 +116,6 @@ class Proxy {
 #endif
     ReqBufWrite *d2h_reqs;
     std::atomic_bool *d2h_flushing;
-    int host_recv_bufs;
 
     route *routing_table;
     SendBufs d2d_send;

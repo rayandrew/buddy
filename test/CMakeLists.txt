@@ -2,7 +2,12 @@ if(NOT MPI_FOUND)
 	return()
 endif()
 
-foreach(case hello around-the-world write_barrier iter double_buf mpi_any ygm-trace)
+add_executable(ygm-trace ygm-trace.cpp)
+target_link_libraries(ygm-trace PRIVATE buddy MPI::MPI_C)
+
+return()
+
+foreach(case hello around-the-world write_barrier iter double_buf mpi_any)
     add_executable(${case}_mpi ${case}.cpp)
     target_link_libraries(${case}_mpi PRIVATE MPI::MPI_C)
 

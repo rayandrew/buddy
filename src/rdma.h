@@ -41,7 +41,7 @@ class Context {
 class QP {
   public:
     QP() = default;
-    QP(int connfd);
+    QP(int connfd, bool same_cq = false);
     QP(server_cqs cqs, int connfd, bool inverse_server = false);
     ~QP();
 

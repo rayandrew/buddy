@@ -29,19 +29,29 @@ bool ReqBufRead::next(request_head **out_head, char **out_data, int dst)
   return false;
 }
 
-bool ReqBufWrite::append(request_head head, const char *data)
+char *ReqBufWrite::append_head(request_head head)
 {
   assert(sizeof(head) + head.size <= len);
 
   if (pos + sizeof(head) + head.size > len)
-    return false;
+    return NULL;
 
   memcpy(buf + pos, &head, sizeof(head));
   pos += sizeof(head);
 
-  memcpy(buf + pos, data, head.size);
+  char *data = buf + pos;
   pos += head.size;
 
+  return data;
+}
+
+bool ReqBufWrite::append(request_head head, const char *data)
+{
+  char *bufptr = append_head(head);
+  if (!bufptr)
+    return false;
+
+  memcpy(bufptr, data, head.size);
   return true;
 }
 

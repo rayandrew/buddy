@@ -12,7 +12,6 @@ struct local_init {
   int32_t world_size;
   int32_t local_size;
   int32_t local_dma;
-  int32_t host_recv_bufs;
   int32_t send_address_table;
 };
 

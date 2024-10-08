@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cassert>
 
 namespace buddy {
 
@@ -78,6 +79,7 @@ class ReqBufWrite {
       return pos;
     }
 
+    char *append_head(request_head head);
     bool append(request_head head, const char *data);
 
   private:

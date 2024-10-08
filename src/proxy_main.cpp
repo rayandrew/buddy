@@ -20,7 +20,6 @@ int main(int argc, char **argv)
 
   int local_size = 0;
   int conn_count = 0;
-  int host_recv_bufs = 0;
   int *conn_list = NULL;
   int *ranks = NULL;
   uint32_t *address_table = NULL;
@@ -59,12 +58,6 @@ int main(int argc, char **argv)
       std::cout << "number of total ranks = " << msg.world_size << std::endl;
     } else
       CHECK(world_size == msg.world_size);
-
-    if (!host_recv_bufs) {
-      host_recv_bufs = msg.host_recv_bufs;
-      std::cout << "num host recv buffers = " << msg.host_recv_bufs << std::endl;
-    } else
-      CHECK(host_recv_bufs == msg.host_recv_bufs);
 
     if (msg.send_address_table) {
       address_table = new uint32_t[msg.world_size];
@@ -146,7 +139,7 @@ int main(int argc, char **argv)
 #ifdef LOCAL_DMA
       &dma_engine,
 #endif
-      ranks, host_recv_bufs, routing_table);
+      ranks, routing_table);
 
   char x = 0;
   for (int i = 0; i < conn_count; i++) {

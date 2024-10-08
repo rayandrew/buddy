@@ -33,7 +33,7 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
 #ifdef LOCAL_DMA
     dma::Engine *dma_engine,
 #endif
-    int *ranks, int host_recv_bufs, route *routing_table)
+    int *ranks, route *routing_table)
   : config(config)
   , cqs(cqs)
   , num_clients(num_clients)
@@ -47,7 +47,6 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   , quit(false)
   , rx_depth(2*num_clients)
   , local_idx_to_rank(ranks)
-  , host_recv_bufs(host_recv_bufs)
   , routing_table(routing_table)
   , d2d_send(num_remotes, D2D_SIZE)
 {
@@ -94,6 +93,8 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   for (unsigned i = 0; i < num_clients; i++)
     client_recv_ready[i] = host_recv_bufs;
 #endif
+
+  TRACE("trace on");
 }
 
 // As this is not latency-critical, we could use completion events to save cpu

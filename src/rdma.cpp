@@ -161,10 +161,13 @@ void server_cqs::destroy()
   CHECK(!ibv_destroy_srq(srq));
 }
 
-QP::QP(int connfd)
+QP::QP(int connfd, bool same_cq)
 {
   send_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
-  recv_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+  if (same_cq)
+    recv_cq = send_cq;
+  else
+    recv_cq = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
   own_cqs = true;
 
   if (!send_cq || !recv_cq) {

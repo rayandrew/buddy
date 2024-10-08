@@ -14,7 +14,7 @@
 
 namespace buddy::host {
 
-uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, int world_size)
+uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, MPI_Comm world_comm, int world_size)
 {
   uint32_t dpu_ip;
 
@@ -28,15 +28,19 @@ uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, int wor
   CHECK(dpu_ent->h_length == sizeof(dpu_ip));
   memcpy(&dpu_ip, *dpu_ent->h_addr_list, sizeof(dpu_ip));
 
-  CHECK_MPI(MPI_Gather(&dpu_ip, sizeof(dpu_ip), MPI_BYTE, table, sizeof(dpu_ip), MPI_BYTE, 0, MPI_COMM_WORLD));
+  CHECK_MPI(MPI_Gather(&dpu_ip, sizeof(dpu_ip), MPI_BYTE, table, sizeof(dpu_ip), MPI_BYTE, 0, world_comm));
   CHECK_MPI(MPI_Bcast(table, sizeof(dpu_ip)*world_size, MPI_BYTE, 0, leader_comm));
 
   return table;
 }
 
-DpuConn::DpuConn(int world_rank, dma::Buffer *dma_buf, int host_recv_bufs)
+DpuConn::DpuConn(MPI_Comm world_comm)
 {
+  int world_rank;
+  CHECK_MPI(MPI_Comm_rank(world_comm, &world_rank));
+
   // OpenMPI specific. In MPI-3, we could use MPI_COMM_TYPE_SHARED.
+  // HACK: this does not work if world_comm != MPI_COMM_WORLD
   int local_size = 0;
   int local_rank = 0;
   char *env;
@@ -51,15 +55,15 @@ DpuConn::DpuConn(int world_rank, dma::Buffer *dma_buf, int host_recv_bufs)
   local_rank = atoi(env);
 
   MPI_Comm leader_comm;
-  CHECK_MPI(MPI_Comm_split(MPI_COMM_WORLD, local_rank == 0 ? 0 : MPI_UNDEFINED, 0, &leader_comm));
+  CHECK_MPI(MPI_Comm_split(world_comm, local_rank == 0 ? 0 : MPI_UNDEFINED, 0, &leader_comm));
 
   char *host = getenv("BUDDY_DPU");
   CHECK(host && *host);
 
   int world_size = 0;
-  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
+  CHECK_MPI(MPI_Comm_size(world_comm, &world_size));
 
-  uint32_t *address_table = make_address_table(host, leader_comm, world_size);
+  uint32_t *address_table = make_address_table(host, leader_comm, world_comm, world_size);
   if (local_rank == 0)
     assert(address_table);
   else
@@ -76,7 +80,6 @@ DpuConn::DpuConn(int world_rank, dma::Buffer *dma_buf, int host_recv_bufs)
 #else
     .local_dma = false,
 #endif
-    .host_recv_bufs = host_recv_bufs,
     .send_address_table = !!address_table,
   };
   full_write(sock, (char *)&msg, sizeof(msg));
@@ -86,13 +89,11 @@ DpuConn::DpuConn(int world_rank, dma::Buffer *dma_buf, int host_recv_bufs)
     delete[] address_table;
   }
 
-  new (&qp) rdma::QP(sock);
+  new (&qp) rdma::QP(sock, true);
 
 #ifdef LOCAL_DMA
   if (dma_buf)
     dma_buf->send(sock);
-#else
-  assert(!dma_buf);
 #endif
 
   char x;
