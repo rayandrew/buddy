@@ -3,7 +3,7 @@ if(NOT MPI_FOUND)
 endif()
 
 add_executable(ygm-trace ygm-trace.cpp)
-target_link_libraries(ygm-trace PRIVATE buddy MPI::MPI_C)
+target_link_libraries(ygm-trace PRIVATE buddy MPI::MPI_C absl::flat_hash_map)
 
 return()
 
