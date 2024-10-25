@@ -107,6 +107,8 @@ main(int argc, char* argv[])
     uint64_t send_count = 0;
     uint64_t recv_count = 0;
 
+    MPI_Barrier(MPI_COMM_WORLD);
+    double t0 = MPI_Wtime();
     /*** START OF CONVEYOR LOOP ***/
     long n = 0;
 
@@ -205,8 +207,13 @@ poll:
         }
       }
     }
-    /*** END OF CONVEYOR LOOP ***/
 end:
+    /*** END OF CONVEYOR LOOP ***/
+    MPI_Barrier(MPI_COMM_WORLD);
+    double t1 = MPI_Wtime();
+    if (MY_PROC == 0) {
+      printf("time: %lf\n", t1-t0);
+    }
 
     status = EXIT_SUCCESS;
 
