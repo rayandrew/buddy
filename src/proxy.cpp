@@ -48,7 +48,9 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   , rx_depth(4*num_clients)
   , local_idx_to_rank(ranks)
   , routing_table(routing_table)
-  , d2d_send(num_remotes, D2D_SIZE)
+  // TODO: allow different d2d buffer size
+  //, d2d_send(num_remotes, D2D_SIZE)
+  , d2d_send(num_remotes, config.h2d_size)
 {
   size_t total_size = config.h2d_size * rx_depth;
   CHECK(total_size);
@@ -370,7 +372,7 @@ void Proxy::route_reqs(char *buf, size_t len)
 
 bool Proxy::flush_remote(unsigned idx)
 {
-  if (d2d_send.reqs(idx).empty() || d2d_send.is_flushing(idx))
+  if (d2d_send.is_flushing(idx) || d2d_send.reqs(idx).empty())
     return true;
 
   d2d_send.set_flushing(idx, true);
