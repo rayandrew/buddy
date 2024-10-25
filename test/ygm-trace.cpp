@@ -269,7 +269,7 @@ int main(int argc, char **argv)
       usage();
     status = 1;
   } else {
-    buddy_init(MPI_COMM_WORLD);
+    buddy_init(MPI_COMM_WORLD, MAXLEN, MAXLEN);
 
     std::ifstream ifs(argv[optind]);
     json jtrace = json::parse(ifs);

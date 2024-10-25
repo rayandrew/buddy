@@ -11,12 +11,12 @@
 #include "dma.h"
 #endif
 
-#define PROXY_BUF_SIZE 2097152UL
-
 namespace buddy::dpu {
 
 struct ProxyConfig {
   bool trace = false;
+  int h2d_size;
+  int d2h_size;
 };
 
 struct route {

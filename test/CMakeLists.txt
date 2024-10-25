@@ -3,7 +3,11 @@ if(NOT MPI_FOUND)
 endif()
 
 add_executable(ygm-trace ygm-trace.cpp)
-target_link_libraries(ygm-trace PRIVATE buddy MPI::MPI_C absl::flat_hash_map)
+target_link_libraries(ygm-trace PRIVATE buddy absl::flat_hash_map)
+
+add_executable(histo histo.cpp)
+target_link_libraries(histo PRIVATE buddy)
+target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)
 
 return()
 

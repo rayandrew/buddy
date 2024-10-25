@@ -34,7 +34,7 @@ uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, MPI_Com
   return table;
 }
 
-DpuConn::DpuConn(MPI_Comm world_comm)
+DpuConn::DpuConn(MPI_Comm world_comm, size_t h2d_size, size_t d2h_size)
 {
   int world_rank;
   CHECK_MPI(MPI_Comm_rank(world_comm, &world_rank));
@@ -81,6 +81,8 @@ DpuConn::DpuConn(MPI_Comm world_comm)
     .local_dma = false,
 #endif
     .send_address_table = !!address_table,
+    .h2d_size = h2d_size,
+    .d2h_size = d2h_size,
   };
   full_write(sock, (char *)&msg, sizeof(msg));
 

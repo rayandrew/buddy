@@ -26,6 +26,7 @@ bool ReqBufRead::next(request_head **out_head, char **out_data, int dst)
   }
 
   assert(pos == len);
+
   return false;
 }
 

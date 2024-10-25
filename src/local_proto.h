@@ -13,6 +13,8 @@ struct local_init {
   int32_t local_size;
   int32_t local_dma;
   int32_t send_address_table;
+  int32_t h2d_size;
+  int32_t d2h_size;
 };
 
 const size_t DMA_SIZE_SEND = 64*1024*1024;

@@ -26,6 +26,8 @@ int main(int argc, char **argv)
   int world_size = 0;
   int local_min = INT_MAX;
   int local_max = 0;
+  int h2d_size = 0;
+  int d2h_size = 0;
 
   std::cout << "listening for connections..." << std::endl;
 
@@ -58,6 +60,18 @@ int main(int argc, char **argv)
       std::cout << "number of total ranks = " << msg.world_size << std::endl;
     } else
       CHECK(world_size == msg.world_size);
+
+    if (!h2d_size) {
+      h2d_size = msg.h2d_size;
+      std::cout << "h2d_size " << msg.h2d_size << std::endl;
+    } else
+      CHECK(h2d_size == msg.h2d_size);
+
+    if (!d2h_size) {
+      d2h_size = msg.d2h_size;
+      std::cout << "d2h_size " << msg.d2h_size << std::endl;
+    } else
+      CHECK(d2h_size == msg.d2h_size);
 
     if (msg.send_address_table) {
       address_table = new uint32_t[msg.world_size];
@@ -133,6 +147,9 @@ int main(int argc, char **argv)
   env = getenv("BUDDY_TRACE");
   if (env)
     config.trace = atoi(env);
+
+  config.h2d_size = h2d_size;
+  config.d2h_size = d2h_size;
 
   buddy::dpu::Proxy proxy(config, cqs, conn_count, remote_qps.size(), world_size,
       local_qps, remote_qps.data(),

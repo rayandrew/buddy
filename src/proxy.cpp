@@ -45,12 +45,13 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   , dma_engine(dma_engine)
 #endif
   , quit(false)
-  , rx_depth(2*num_clients)
+  , rx_depth(4*num_clients)
   , local_idx_to_rank(ranks)
   , routing_table(routing_table)
   , d2d_send(num_remotes, D2D_SIZE)
 {
-  size_t total_size = PROXY_BUF_SIZE * rx_depth;
+  size_t total_size = config.h2d_size * rx_depth;
+  CHECK(total_size);
   char *h2d_buf = new char[total_size];
 
   h2d_mr = ibv_reg_mr(rdma::Context::get().get_pd(), h2d_buf, total_size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
@@ -75,13 +76,14 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
     new (&d2h_reqs[i]) ReqBufWrite(buf, DMA_SIZE_RECV);
   }
 #else
-  size_t d2h_size = DMA_SIZE_RECV * num_clients;
-  char *bufs = new char[d2h_size];
-  d2h_mr = ibv_reg_mr(rdma::Context::get().get_pd(), bufs, d2h_size, IBV_ACCESS_LOCAL_WRITE);
+  size_t d2h_total = config.d2h_size * num_clients;
+  CHECK(d2h_total);
+  char *bufs = new char[d2h_total];
+  d2h_mr = ibv_reg_mr(rdma::Context::get().get_pd(), bufs, d2h_total, IBV_ACCESS_LOCAL_WRITE);
   CHECK(d2h_mr);
 
   for (unsigned i = 0; i < num_clients; i++)
-    new (&d2h_reqs[i]) ReqBufWrite(bufs + i*DMA_SIZE_RECV, DMA_SIZE_RECV);
+    new (&d2h_reqs[i]) ReqBufWrite(bufs + i*config.d2h_size, config.d2h_size);
 
   d2h_flushing = new std::atomic_bool[num_clients];
   for (unsigned i = 0; i < num_clients; i++)
@@ -210,7 +212,7 @@ void Proxy::rdma_loop()
       uint32_t imm_tag = wc[i].imm_data;
 
       uint64_t wr_id = wc[i].wr_id;
-      char *recv_buf = (char *)h2d_mr->addr + wr_id * PROXY_BUF_SIZE;
+      char *recv_buf = (char *)h2d_mr->addr + wr_id * config.h2d_size;
       size_t msglen = wc[i].byte_len;
       VALGRIND_MAKE_MEM_DEFINED(recv_buf, msglen);
 
@@ -315,12 +317,12 @@ void Proxy::post_recv(uint64_t wr_id)
   assert(wr_id >= 0);
   assert(wr_id < rx_depth);
 
-  uint64_t offset = wr_id * PROXY_BUF_SIZE;
+  uint64_t offset = wr_id * config.h2d_size;
   uint64_t h2d_buf = (uint64_t) h2d_mr->addr;
 
   struct ibv_sge list = {
     .addr = h2d_buf + offset,
-    .length = PROXY_BUF_SIZE,
+    .length = config.h2d_size,
     .lkey	= h2d_mr->lkey
   };
   VALGRIND_MAKE_MEM_UNDEFINED(list.addr, list.length);
@@ -400,11 +402,12 @@ bool Proxy::flush_all()
 
 bool Proxy::flush_local(unsigned idx)
 {
-  if (d2h_reqs[idx].empty() || d2h_flushing[idx])
-    return true;;
+  if (d2h_flushing[idx] || d2h_reqs[idx].empty())
+    return true;
 
   auto size = d2h_reqs[idx].get_pos();
   CHECK((uint32_t)size == size);
+  assert(size);
 
 #ifdef LOCAL_DMA
   if (!client_recv_ready[idx])
@@ -432,7 +435,7 @@ bool Proxy::flush_local(unsigned idx)
   assert(!d2h_flushing[idx]);
   d2h_flushing[idx] = true;
   TRACE("send to local rank " << local_idx_to_rank[idx] << " size " << size);
-  local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_mr, size, idx*DMA_SIZE_RECV, route::make_local(idx).as_int());
+  local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_mr, size, idx*config.d2h_size, route::make_local(idx).as_int());
 #endif
 
   return true;

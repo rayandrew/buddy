@@ -8,8 +8,7 @@
 extern "C" {
 #endif
 
-// Potentially we may want some options here
-void buddy_init(MPI_Comm comm);
+void buddy_init(MPI_Comm comm, size_t max_send, size_t min_recv);
 void buddy_finalize();
 
 // Use buf->addr to get a pointer to the buffer

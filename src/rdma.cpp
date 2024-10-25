@@ -277,8 +277,8 @@ void QP::setup_common(ibv_srq *srq, int connfd, bool inverse_server)
   qp_attr.timeout	      = 14;
   qp_attr.retry_cnt	    = 7;
   // rnr_retry is if receiver does not have enough resources (recv buffers). 7=infinite.
-  //qp_attr.rnr_retry	    = 7;
-  qp_attr.rnr_retry	    = 6;
+  qp_attr.rnr_retry	    = 7;
+  //qp_attr.rnr_retry	    = 0;
   qp_attr.sq_psn	      = local_dest.psn;
   qp_attr.max_rd_atomic = 1;
   if (ibv_modify_qp(qp, &qp_attr, IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
