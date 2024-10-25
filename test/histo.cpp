@@ -121,9 +121,8 @@ main(int argc, char* argv[])
         long pe = index % PROCS;
 
         buddy::request_head head = {.size = sizeof(index), .dst = pe};
-retry:
-        char *data = writer.append_head(head);
-        if (!data) {
+        char *data;
+        while (!(data = writer.append_head(head))) {
           assert(!send_busy[curr_send]);
           buddy_send(send_buf, writer.get_pos(), curr_send*MAXLEN, curr_send);
           send_busy[curr_send] = true;
@@ -140,9 +139,6 @@ retry:
           }
           if (send_block)
             goto poll;
-
-          if (!data)
-            goto retry;
         }
 
         *(long *)data = payload;
