@@ -156,6 +156,10 @@ retry:
       }
 
 poll:
+      MPI_Request count_req = MPI_REQUEST_NULL;
+      uint64_t local_counts[2] = {};
+      uint64_t global_counts[2] = {};
+
       while (send_block || n == load) {
         int num_buf = num_sendbuf + num_recvbuf;
         uint64_t ids[num_buf];
@@ -185,11 +189,18 @@ poll:
         }
 
         if (n == load) {
-          uint64_t local_counts[2] = {send_count, recv_count};
-          uint64_t global_counts[2] = {};
+          if (count_req == MPI_REQUEST_NULL) {
+            local_counts[0] = send_count;
+            local_counts[1] = recv_count;
+            global_counts[0] = 0;
+            global_counts[1] = 0;
 
-          CHECK_MPI(MPI_Allreduce(local_counts, global_counts, 2, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD));
-          if (global_counts[0] == global_counts[1])
+            CHECK_MPI(MPI_Iallreduce(local_counts, global_counts, 2, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD, &count_req));
+          }
+
+          int flag;
+          CHECK_MPI(MPI_Test(&count_req, &flag, MPI_STATUS_IGNORE));
+          if (flag && global_counts[0] == global_counts[1])
             goto end;
         }
       }
