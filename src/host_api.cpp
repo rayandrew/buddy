@@ -16,6 +16,21 @@ static size_t g_min_recv;
 
 static host::DpuConn *g_dpu_conn;
 
+enum tt_clock {
+  TT_SEND,
+  TT_RECV,
+  TT_POLL,
+  TT_COUNT,
+};
+
+static const char *tt_label[TT_COUNT] = {
+  "send",
+  "recv",
+  "poll",
+};
+
+#include "tictoc.h"
+
 void buddy_init(MPI_Comm comm, size_t max_send, size_t min_recv)
 {
   rdma::init();
@@ -32,6 +47,8 @@ void buddy_init(MPI_Comm comm, size_t max_send, size_t min_recv)
 
 void buddy_finalize()
 {
+  tt_print_mpi("buddy api breakdown");
+
   delete g_dpu_conn;
   g_dpu_conn = nullptr;
 }
@@ -58,22 +75,34 @@ void buddy_send(buddy_buf *buf, size_t len, size_t offset, uint64_t id)
   if (!len)
     return;
 
+  //TicToc tt(TT_SEND);
+  tic(TT_SEND);
+
   TRACE(1, "buddy_send len=" << len << " id=" << id);
   CHECK(len <= g_max_send);
 
   g_dpu_conn->qp.send_imm(IMM_H2D_RDMA, buf, len, offset, id);
+
+  toc(TT_SEND);
 }
 
 void buddy_recv(buddy_buf *buf, size_t len, size_t offset, uint64_t id)
 {
+  //TicToc tt(TT_RECV);
+  tic(TT_RECV);
+
   TRACE(1, "buddy_recv len=" << len << " id=" << id);
   CHECK(len >= g_min_recv);
 
   g_dpu_conn->qp.recv(buf, len, offset, id);
+
+  toc(TT_RECV);
 }
 
 int buddy_poll(uint64_t *ids, size_t *sizes, int max)
 {
+  tic(TT_POLL);
+
   ibv_wc wc[max];
   assert(g_dpu_conn->qp.get_recv_cq() == g_dpu_conn->qp.get_send_cq());
   int n = ibv_poll_cq(g_dpu_conn->qp.get_recv_cq(), max, wc);
@@ -103,6 +132,8 @@ int buddy_poll(uint64_t *ids, size_t *sizes, int max)
       FAIL("wc error");
     }
   }
+
+  toc(TT_POLL);
 
   return n;
 }

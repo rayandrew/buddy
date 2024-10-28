@@ -6,6 +6,29 @@
 
 #define TRACE(x) do{if (config.trace){std::clog << x << std::endl;}}while(0)
 
+enum tt_clock {
+  TT_RDMALOOP,
+  TT_POLL,
+  TT_ROUTE,
+  TT_LOCFLUSH,
+  TT_REMFLUSH,
+  TT_D2DBLOCK,
+  TT_D2HBLOCK,
+  TT_COUNT,
+};
+
+static const char *tt_label[TT_COUNT] = {
+  "rdmaloop",
+  "poll",
+  "route",
+  "locflush",
+  "remflush",
+  "d2dblock",
+  "d2hblock",
+};
+
+#include "tictoc.h"
+
 namespace buddy::dpu {
 
 Proxy::~Proxy()
@@ -174,8 +197,12 @@ void Proxy::rdma_loop()
   unsigned quit_counter = 0;
   bool pending_flush = false;
 
+  tic(TT_RDMALOOP);
+
   while (!quit) {
     ibv_wc wc[rx_depth];
+
+    tic(TT_POLL);
 
     int n = ibv_poll_cq(cqs.recv, rx_depth, wc);
     CHECK(n >= 0);
@@ -199,6 +226,8 @@ void Proxy::rdma_loop()
       n = ibv_poll_cq(cqs.recv, rx_depth, wc);
     }
     CHECK(n >= 0);
+
+    toc(TT_POLL);
 
     if (n > 0)
       hist_reqs[n-1]++;
@@ -302,6 +331,8 @@ void Proxy::rdma_loop()
     }
   }
 
+  toc(TT_RDMALOOP);
+
   printf("hist_reqs = [");
   for (uint64_t i = 0; i < rx_depth; i++) {
     printf("%lu,", hist_reqs[i]);
@@ -312,6 +343,9 @@ void Proxy::rdma_loop()
     FAIL("join harvest thread failed");
 
   free(hist_reqs);
+  
+  std::cout << "--- proxy breakdown" << " ---" << std::endl;
+  tt_print();
 }
 
 void Proxy::post_recv(uint64_t wr_id)
@@ -345,7 +379,12 @@ void Proxy::post_recv(uint64_t wr_id)
 
 void Proxy::route_reqs(char *buf, size_t len)
 {
+  tic(TT_ROUTE);
+
   ReqBufRead reader(buf, len);
+
+  bool cache_d2d_flush[num_remote];
+  bool cache_d2h_flush[num_clients];
 
   request_head *head;
   char *data;
@@ -354,26 +393,40 @@ void Proxy::route_reqs(char *buf, size_t len)
     route r = routing_table[head->dst];
     if (r.remote) {
       TRACE("route to " << head->dst << " (remote " << r.idx << ")");
-      while (d2d_send.is_flushing(r.idx));
+
+      if (d2d_send.is_flushing(r.idx)) {
+        tic(TT_D2DBLOCK);
+        while (d2d_send.is_flushing(r.idx));
+        toc(TT_D2DBLOCK);
+      }
+
       while (!d2d_send.reqs(r.idx).append(*head, data))
         if (!flush_remote(r.idx))
           FAIL("remote send buf is full but cannot be flushed!");
     } else {
       TRACE("route to " << head->dst << " (local " << r.idx << ")");
-      // Optimization: unnecessary to flush all buffers here
-      // Also, could be async?
-      while (d2h_flushing[r.idx]);
+
+      if (d2h_flushing[r.idx]) {
+        tic(TT_D2HBLOCK);
+        while (d2h_flushing[r.idx]);
+        toc(TT_D2HBLOCK);
+      }
+
       while (!d2h_reqs[r.idx].append(*head, data))
         if (!flush_local(r.idx))
           FAIL("recv buffer is full, but cannot be flushed!");
     }
   }
+
+  toc(TT_ROUTE);
 }
 
 bool Proxy::flush_remote(unsigned idx)
 {
   if (d2d_send.is_flushing(idx) || d2d_send.reqs(idx).empty())
     return true;
+
+  tic(TT_REMFLUSH);
 
   d2d_send.set_flushing(idx, true);
 
@@ -382,6 +435,8 @@ bool Proxy::flush_remote(unsigned idx)
   remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send.mr(),
       size, d2d_send.offset(idx),
       route::make_remote(idx).as_int());
+
+  toc(TT_REMFLUSH);
 
   return true;
 }
@@ -406,6 +461,8 @@ bool Proxy::flush_local(unsigned idx)
 {
   if (d2h_flushing[idx] || d2h_reqs[idx].empty())
     return true;
+
+  tic(TT_LOCFLUSH);
 
   auto size = d2h_reqs[idx].get_pos();
   CHECK((uint32_t)size == size);
@@ -439,6 +496,8 @@ bool Proxy::flush_local(unsigned idx)
   TRACE("send to local rank " << local_idx_to_rank[idx] << " size " << size);
   local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_mr, size, idx*config.d2h_size, route::make_local(idx).as_int());
 #endif
+
+  toc(TT_LOCFLUSH);
 
   return true;
 }

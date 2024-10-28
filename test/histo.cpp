@@ -48,6 +48,22 @@ xmpi_init(int argc, char* argv[])
   return argc;
 }
 
+enum tt_clock {
+  TT_PUSH,
+  TT_PULL,
+  TT_BARRIER,
+  TT_BUFPROC,
+  TT_COUNT,
+};
+
+static const char *tt_label[TT_COUNT] = {
+  "push",
+  "pull",
+  "barrier",
+  "bufproc",
+};
+
+#include "tictoc.h"
 
 int
 main(int argc, char* argv[])
@@ -116,6 +132,7 @@ main(int argc, char* argv[])
     for (;;) {
       bool send_block = false;
 
+      tic(TT_PUSH);
       for (; n < load; n++) {
         long payload = index / PROCS;
         long pe = index % PROCS;
@@ -154,6 +171,9 @@ main(int argc, char* argv[])
       }
 
 poll:
+      toc(TT_PUSH);
+      tic(TT_PULL);
+
       MPI_Request count_req = MPI_REQUEST_NULL;
       uint64_t local_counts[2] = {};
       uint64_t global_counts[2] = {};
@@ -173,6 +193,7 @@ poll:
             size_t offset = (ids[i] - num_sendbuf)*MAXLEN;
             buddy::ReqBufRead reader((char *)recv_buf->addr + offset, sizes[i]);
 
+            tic(TT_BUFPROC);
             buddy::request_head *head;
             char *data;
             while (reader.next(&head, &data, -1)) {
@@ -181,12 +202,15 @@ poll:
               counts[*local] += 1;
               recv_count++;
             }
+            toc(TT_BUFPROC);
 
             buddy_recv(recv_buf, MAXLEN, offset, ids[i]);
           }
         }
 
         if (n == load) {
+          tic(TT_BARRIER);
+
           if (count_req == MPI_REQUEST_NULL) {
             local_counts[0] = send_count;
             local_counts[1] = recv_count;
@@ -198,12 +222,19 @@ poll:
 
           int flag;
           CHECK_MPI(MPI_Test(&count_req, &flag, MPI_STATUS_IGNORE));
-          if (flag && global_counts[0] == global_counts[1])
+          if (flag && global_counts[0] == global_counts[1]) {
             goto end;
+          }
+
+          toc(TT_BARRIER);
         }
       }
+
+      toc(TT_PULL);
     }
 end:
+    toc(TT_PULL);
+
     /*** END OF CONVEYOR LOOP ***/
     MPI_Barrier(MPI_COMM_WORLD);
     double t1 = MPI_Wtime();
@@ -232,6 +263,8 @@ end:
   buddy_free(send_buf);
   buddy_free(recv_buf);
   buddy_finalize();
+
+  tt_print_mpi("histo breakdown");
 
   free(counts);
 
