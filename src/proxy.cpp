@@ -133,6 +133,7 @@ void Proxy::harvest_wcs()
 
 void *run_harvest_thread(void *arg)
 {
+  pthread_setname_np(pthread_self(), "buddy-harvest");
   Proxy *proxy = (Proxy *)arg;
   proxy->harvest_wcs();
   return NULL;
