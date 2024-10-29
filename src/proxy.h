@@ -7,10 +7,6 @@
 #include "request.h"
 #include "util.h"
 
-#ifdef LOCAL_DMA
-#include "dma.h"
-#endif
-
 namespace buddy::dpu {
 
 struct ProxyConfig {
@@ -61,11 +57,11 @@ class SendBufs {
     SendBufs(unsigned n, unsigned size);
     ~SendBufs();
 
-    inline ReqBufWrite &reqs(unsigned i) { return reqbufs[i]; }
-    inline size_t offset(unsigned i) { return i*size; }
-    inline ibv_mr *mr() { return mr_; }
-    inline bool is_flushing(unsigned i) { return flushing[i]; }
-    inline void set_flushing(unsigned i, bool x)
+    ReqBufWrite &reqs(unsigned i) { return reqbufs[i]; }
+    size_t offset(unsigned i) { return i*size; }
+    ibv_mr *mr() { return mr_; }
+    bool is_flushing(unsigned i) { return flushing[i]; }
+    void set_flushing(unsigned i, bool x)
     {
       assert(flushing[i] != x);
       flushing[i] = x;
@@ -84,9 +80,6 @@ class Proxy {
     Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
         unsigned num_remotes, int world_size,
         rdma::QP *local_qps, rdma::QP *remote_qps,
-#ifdef LOCAL_DMA
-        dma::Engine *dma_engine,
-#endif
         int *ranks, route *routing_table);
     ~Proxy();
     void rdma_loop();
@@ -99,9 +92,6 @@ class Proxy {
     const int world_size;
     rdma::QP *local_qps;
     rdma::QP *remote_qps;
-#ifdef LOCAL_DMA
-    dma::Engine *dma_engine;
-#endif
     std::atomic_bool quit;
     const size_t rx_depth;
 
@@ -109,16 +99,10 @@ class Proxy {
     absl::flat_hash_map<unsigned, unsigned> qp_num_to_idx;
     int *local_idx_to_rank;
 
-#ifdef LOCAL_DMA
-    int *client_recv_ready;
-#else
-    ibv_mr *d2h_mr;
-#endif
-    ReqBufWrite *d2h_reqs;
-    std::atomic_bool *d2h_flushing;
+    SendBufs d2h_send;
+    SendBufs d2d_send;
 
     route *routing_table;
-    SendBufs d2d_send;
 
     void post_recv(uint64_t wr_id);
 
@@ -126,9 +110,9 @@ class Proxy {
     friend void *run_harvest_thread(void *arg);
 
     void route_reqs(char *buf, size_t len);
-    bool flush_all();
-    bool flush_local(unsigned idx);
-    bool flush_remote(unsigned idx);
+    void flush_all();
+    void flush_local(unsigned idx);
+    void flush_remote(unsigned idx);
 };
 
 } // namespace buddy::dpu

@@ -36,26 +36,11 @@ Proxy::~Proxy()
   char *h2d_buf = (char *)h2d_mr->addr;
   CHECK(!ibv_dereg_mr(h2d_mr));
   delete[] h2d_buf;
-
-  delete[] d2h_reqs;
-
-#ifdef LOCAL_DMA
-  delete[] client_recv_ready;
-#else
-  char *buf = (char *)d2h_mr->addr;
-  CHECK(!ibv_dereg_mr(d2h_mr));
-  delete[] buf;
-#endif
-
-  delete[] d2h_flushing;
 }
 
 Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
     unsigned num_remotes, int world_size,
     rdma::QP *local_qps, rdma::QP *remote_qps,
-#ifdef LOCAL_DMA
-    dma::Engine *dma_engine,
-#endif
     int *ranks, route *routing_table)
   : config(config)
   , cqs(cqs)
@@ -64,16 +49,14 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   , world_size(world_size)
   , local_qps(local_qps)
   , remote_qps(remote_qps)
-#ifdef LOCAL_DMA
-  , dma_engine(dma_engine)
-#endif
   , quit(false)
   , rx_depth(4*num_clients)
   , local_idx_to_rank(ranks)
-  , routing_table(routing_table)
+  , d2h_send(num_clients, config.d2h_size)
   // TODO: allow different d2d buffer size
   //, d2d_send(num_remotes, D2D_SIZE)
   , d2d_send(num_remotes, config.h2d_size)
+  , routing_table(routing_table)
 {
   size_t total_size = config.h2d_size * rx_depth;
   CHECK(total_size);
@@ -93,33 +76,6 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   for (uint64_t wr_id = 0; wr_id < rx_depth; wr_id++) {
     post_recv(wr_id);
   }
-
-  d2h_reqs = new ReqBufWrite[num_clients];
-#ifdef LOCAL_DMA
-  for (unsigned i = 0; i < num_clients; i++) {
-    char *buf = dma_engine->client_buf(i) + DMA_OFFSET_RECV;
-    new (&d2h_reqs[i]) ReqBufWrite(buf, DMA_SIZE_RECV);
-  }
-#else
-  size_t d2h_total = config.d2h_size * num_clients;
-  CHECK(d2h_total);
-  char *bufs = new char[d2h_total];
-  d2h_mr = ibv_reg_mr(rdma::Context::get().get_pd(), bufs, d2h_total, IBV_ACCESS_LOCAL_WRITE);
-  CHECK(d2h_mr);
-
-  for (unsigned i = 0; i < num_clients; i++)
-    new (&d2h_reqs[i]) ReqBufWrite(bufs + i*config.d2h_size, config.d2h_size);
-
-  d2h_flushing = new std::atomic_bool[num_clients];
-  for (unsigned i = 0; i < num_clients; i++)
-    d2h_flushing[i] = false;
-#endif
-
-#ifdef LOCAL_DMA
-  client_recv_ready = new int[num_clients];
-  for (unsigned i = 0; i < num_clients; i++)
-    client_recv_ready[i] = host_recv_bufs;
-#endif
 
   TRACE("trace on");
 }
@@ -161,19 +117,16 @@ void Proxy::harvest_wcs()
       if (wc[i].opcode & IBV_WC_RECV)
         FAIL("recv completion in send queue");
 
-#ifndef LOCAL_DMA
       uint64_t wr_id = wc[i].wr_id;
       route rt = route::from_int(wr_id);
-      if (rt.remote) {
-        assert(d2d_send.is_flushing(rt.idx));
-        d2d_send.reqs(rt.idx).reset_pos();
-        d2d_send.set_flushing(rt.idx, false);
-      } else {
-        assert(d2h_flushing[rt.idx]);
-        d2h_reqs[rt.idx].reset_pos();
-        d2h_flushing[rt.idx] = false;
-      }
-#endif
+
+      auto send_bufs = &d2h_send;
+      if (rt.remote)
+        send_bufs = &d2d_send;
+
+      assert(send_bufs->is_flushing(rt.idx));
+      send_bufs->reqs(rt.idx).reset_pos();
+      send_bufs->set_flushing(rt.idx, false);
     }
   }
 }
@@ -199,6 +152,7 @@ void Proxy::rdma_loop()
 
   tic(TT_RDMALOOP);
 
+  // Tiny opt: only check atomic quit flag every X iterations
   while (!quit) {
     ibv_wc wc[rx_depth];
 
@@ -207,22 +161,12 @@ void Proxy::rdma_loop()
     int n = ibv_poll_cq(cqs.recv, rx_depth, wc);
     CHECK(n >= 0);
 
-    const double DEADLOCK_TIME = 1.0;
-    double poll_start = 0.0;
-
     if (!n && pending_flush) {
-      if (flush_all())
-        pending_flush = false;
-      else
-        poll_start = clock();
+      flush_all();
+      pending_flush = false;
     }
 
     while (n == 0 && !quit) {
-      if (poll_start && clock()-poll_start > DEADLOCK_TIME) {
-        std::cerr << "warning: Possible deadlock detected while waiting for client buffer to be ready!" << std::endl;
-        poll_start = 0.0;
-      }
-
       n = ibv_poll_cq(cqs.recv, rx_depth, wc);
     }
     CHECK(n >= 0);
@@ -237,9 +181,6 @@ void Proxy::rdma_loop()
       CHECK(wc[i].opcode == IBV_WC_RECV || wc[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM);
       CHECK(wc[i].wc_flags & IBV_WC_WITH_IMM);
 
-#ifdef LOCAL_DMA
-      unsigned client_idx = qp_num_to_idx[wc[i].qp_num];
-#endif
       uint32_t imm_tag = wc[i].imm_data;
 
       uint64_t wr_id = wc[i].wr_id;
@@ -253,56 +194,6 @@ void Proxy::rdma_loop()
             quit_counter++;
             if (quit_counter == num_clients)
               quit = true;
-            break;
-          }
-
-        case IMM_H2D_DMA:
-          {
-#ifdef LOCAL_DMA
-            CHECK(msglen == sizeof(uint64_t));
-
-            uint64_t dmalen = *((uint64_t *)recv_buf);
-            assert(dmalen > 0);
-            CHECK((uint32_t)dmalen == dmalen);
-
-            dma::jobspec job = {
-              .client = client_idx,
-              .offset = DMA_OFFSET_SEND,
-              .len = (uint32_t)dmalen,
-              .dir = dma::H2D,
-            };
-            dma_engine->transfer(job);
-
-            // Optimization: do this in another thread
-            job = {};
-            while (!dma_engine->poll(&job));
-
-            CHECK(job.client == client_idx);
-            CHECK(job.offset == DMA_OFFSET_SEND);
-            CHECK(job.dir == dma::H2D);
-
-            // Ack
-            local_qps[client_idx].write_imm(IMM_H2D_DMA);
-
-            // Optimization: async
-            char *src_buf = dma_engine->client_buf(client_idx) + DMA_OFFSET_SEND;
-            route_reqs(src_buf, dmalen);
-
-            pending_flush = true;
-#else
-            FAIL("unexpected dma message");
-#endif
-            break;
-          }
-
-        case IMM_D2H_DMA:
-          {
-#ifdef LOCAL_DMA
-            assert(!client_recv_ready[client_idx]);
-            client_recv_ready[client_idx] = true;
-#else
-            FAIL("unexpected dma message");
-#endif
             break;
           }
 
@@ -383,48 +274,42 @@ void Proxy::route_reqs(char *buf, size_t len)
 
   ReqBufRead reader(buf, len);
 
-  bool cache_d2d_flush[num_remote];
-  bool cache_d2h_flush[num_clients];
-
   request_head *head;
   char *data;
   while (reader.next(&head, &data, -1)) {
     CHECK(head->dst >= 0 && head->dst < world_size);
     route r = routing_table[head->dst];
+
+    auto clock = TT_D2HBLOCK;
+    auto send_bufs = &d2h_send;
     if (r.remote) {
+      clock = TT_D2DBLOCK;
+      send_bufs = &d2d_send;
       TRACE("route to " << head->dst << " (remote " << r.idx << ")");
-
-      if (d2d_send.is_flushing(r.idx)) {
-        tic(TT_D2DBLOCK);
-        while (d2d_send.is_flushing(r.idx));
-        toc(TT_D2DBLOCK);
-      }
-
-      while (!d2d_send.reqs(r.idx).append(*head, data))
-        if (!flush_remote(r.idx))
-          FAIL("remote send buf is full but cannot be flushed!");
     } else {
       TRACE("route to " << head->dst << " (local " << r.idx << ")");
-
-      if (d2h_flushing[r.idx]) {
-        tic(TT_D2HBLOCK);
-        while (d2h_flushing[r.idx]);
-        toc(TT_D2HBLOCK);
-      }
-
-      while (!d2h_reqs[r.idx].append(*head, data))
-        if (!flush_local(r.idx))
-          FAIL("recv buffer is full, but cannot be flushed!");
     }
+
+    if (send_bufs->is_flushing(r.idx)) {
+      tic(clock);
+      while (send_bufs->is_flushing(r.idx));
+      toc(clock);
+    }
+
+    while (!send_bufs->reqs(r.idx).append(*head, data))
+      if (r.remote)
+        flush_remote(r.idx);
+      else
+        flush_local(r.idx);
   }
 
   toc(TT_ROUTE);
 }
 
-bool Proxy::flush_remote(unsigned idx)
+void Proxy::flush_remote(unsigned idx)
 {
   if (d2d_send.is_flushing(idx) || d2d_send.reqs(idx).empty())
-    return true;
+    return;
 
   tic(TT_REMFLUSH);
 
@@ -437,69 +322,32 @@ bool Proxy::flush_remote(unsigned idx)
       route::make_remote(idx).as_int());
 
   toc(TT_REMFLUSH);
-
-  return true;
 }
 
-bool Proxy::flush_all()
+void Proxy::flush_local(unsigned idx)
 {
-  bool all_flushed = true;
-
-  // Optimization: queue up all transfers at once
-  for (unsigned i = 0; i < num_clients; i++)
-    if (!flush_local(i))
-      all_flushed = false;
-
-  for (unsigned i = 0; i < num_remotes; i++)
-    if (!flush_remote(i))
-      all_flushed = false;
-
-  return all_flushed;
-}
-
-bool Proxy::flush_local(unsigned idx)
-{
-  if (d2h_flushing[idx] || d2h_reqs[idx].empty())
-    return true;
+  if (d2h_send.is_flushing(idx) || d2h_send.reqs(idx).empty())
+    return;
 
   tic(TT_LOCFLUSH);
 
-  auto size = d2h_reqs[idx].get_pos();
-  CHECK((uint32_t)size == size);
-  assert(size);
+  d2h_send.set_flushing(idx, true);
 
-#ifdef LOCAL_DMA
-  if (!client_recv_ready[idx])
-    return false;
-
-  --client_recv_ready[idx];
-
-  dma::jobspec job = {
-    .client = idx,
-    .offset = DMA_OFFSET_RECV,
-    .len = (uint32_t)size,
-    .dir = dma::D2H,
-  };
-  dma_engine->transfer(job);
-
-  job = {};
-  while (!dma_engine->poll(&job));
-  CHECK(job.client == idx);
-  CHECK(job.offset == DMA_OFFSET_RECV);
-  CHECK(job.dir == dma::D2H);
-
-  local_qps[idx].send_imm_inline(IMM_D2H_DMA, (char*)&size, sizeof(size));
-  d2h_reqs[idx].reset_pos();
-#else
-  assert(!d2h_flushing[idx]);
-  d2h_flushing[idx] = true;
+  size_t size = d2h_send.reqs(idx).get_pos();
   TRACE("send to local rank " << local_idx_to_rank[idx] << " size " << size);
-  local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_mr, size, idx*config.d2h_size, route::make_local(idx).as_int());
-#endif
+  local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_send.mr(), size,
+      d2h_send.offset(idx), route::make_local(idx).as_int());
 
   toc(TT_LOCFLUSH);
+}
 
-  return true;
+void Proxy::flush_all()
+{
+  for (unsigned i = 0; i < num_clients; i++)
+    flush_local(i);
+
+  for (unsigned i = 0; i < num_remotes; i++)
+    flush_remote(i);
 }
 
 SendBufs::SendBufs(unsigned n, unsigned size)
