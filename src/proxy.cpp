@@ -18,6 +18,7 @@ enum tt_clock {
   TT_REMFLUSH,
   TT_D2DBLOCK,
   TT_D2HBLOCK,
+  TT_APPBLOCK,
   TT_COUNT,
 };
 
@@ -29,6 +30,7 @@ static const char *tt_label[TT_COUNT] = {
   "remflush",
   "d2dblock",
   "d2hblock",
+  "appblock",
 };
 
 #include "tictoc.h"
@@ -40,6 +42,8 @@ Proxy::~Proxy()
   char *h2d_buf = (char *)h2d_mr->addr;
   CHECK(!ibv_dereg_mr(h2d_mr));
   delete[] h2d_buf;
+
+  std::cout << "routed bytes: " << count_routed_bytes << std::endl;
 }
 
 Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
@@ -84,73 +88,71 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
   TRACE("trace on");
 }
 
-// As this is not latency-critical, we could use completion events to save cpu
 void Proxy::harvest_wcs()
 {
-  while (!quit) {
-    ibv_wc wc[rx_depth];
-    int n;
+  ibv_wc wc[rx_depth];
 
-    do {
-      n = ibv_poll_cq(cqs.send, rx_depth, wc);
-    } while (n == 0 && !quit);
+  int n = ibv_poll_cq(cqs.send, rx_depth, wc);
 
-    if (n < 0) {
-      perror("ibv_poll_cq");
-      FAIL("ibv_poll_cq failed");
+  if (n < 0) {
+    perror("ibv_poll_cq");
+    FAIL("ibv_poll_cq failed");
+  }
+
+  for (int i = 0; i < n; i++) {
+    if (wc[i].status != IBV_WC_SUCCESS) {
+      std::cerr << "wc status " << wc[i].status << ": " << ibv_wc_status_str(wc[i].status) << std::endl;
+      std::cerr << "vendor_err " << wc[i].vendor_err << std::endl;
+
+      for (unsigned idx = 0; idx < num_clients; idx++)
+        if (local_qps[idx].get_qp()->qp_num == wc[i].qp_num)
+          std::cerr << "destination: rank " << local_idx_to_rank[idx] << " (local idx " << idx << ")" << std::endl;
+
+      for (unsigned idx = 0; idx < num_remotes; idx++)
+        if (remote_qps[idx].get_qp()->qp_num == wc[i].qp_num)
+          std::cerr << "destination: remote dpu " << idx << std::endl;
+
+      if (wc[i].status == IBV_WC_RNR_RETRY_EXC_ERR)
+        std::cerr << "Maybe the host ran out of receive buffers, try increasing BUDDY_RECV_BUFS." << std::endl;
+      FAIL("wc error");
     }
 
-    for (int i = 0; i < n; i++) {
-      if (wc[i].status != IBV_WC_SUCCESS) {
-        std::cerr << "wc status " << wc[i].status << ": " << ibv_wc_status_str(wc[i].status) << std::endl;
-        std::cerr << "vendor_err " << wc[i].vendor_err << std::endl;
+    if (wc[i].opcode & IBV_WC_RECV)
+      FAIL("recv completion in send queue");
 
-        for (unsigned idx = 0; idx < num_clients; idx++)
-          if (local_qps[idx].get_qp()->qp_num == wc[i].qp_num)
-            std::cerr << "destination: rank " << local_idx_to_rank[idx] << " (local idx " << idx << ")" << std::endl;
+    uint64_t wr_id = wc[i].wr_id;
+    route rt = route::from_int(wr_id);
 
-        for (unsigned idx = 0; idx < num_remotes; idx++)
-          if (remote_qps[idx].get_qp()->qp_num == wc[i].qp_num)
-            std::cerr << "destination: remote dpu " << idx << std::endl;
+    auto send_bufs = &d2h_send;
+    if (rt.remote)
+      send_bufs = &d2d_send;
 
-        if (wc[i].status == IBV_WC_RNR_RETRY_EXC_ERR)
-          std::cerr << "Maybe the host ran out of receive buffers, try increasing BUDDY_RECV_BUFS." << std::endl;
-        FAIL("wc error");
-      }
-
-      if (wc[i].opcode & IBV_WC_RECV)
-        FAIL("recv completion in send queue");
-
-      uint64_t wr_id = wc[i].wr_id;
-      route rt = route::from_int(wr_id);
-
-      auto send_bufs = &d2h_send;
-      if (rt.remote)
-        send_bufs = &d2d_send;
-
-      assert(send_bufs->is_flushing(rt.idx));
-      send_bufs->reqs(rt.idx).reset_pos();
-      send_bufs->set_flushing(rt.idx, false);
-    }
+    assert(send_bufs->is_flushing(rt.idx));
+    send_bufs->reqs(rt.idx).reset_pos();
+    send_bufs->set_flushing(rt.idx, false);
   }
 }
 
 void *run_harvest_thread(void *arg)
 {
   pthread_setname_np(pthread_self(), "buddy-harvest");
+
   Proxy *proxy = (Proxy *)arg;
-  proxy->harvest_wcs();
+  while (!proxy->quit)
+    proxy->harvest_wcs();
+
   return NULL;
 }
 
 void Proxy::rdma_loop()
 {
-  pthread_t harvest_thread;
-
   uint64_t *hist_reqs = (uint64_t*)calloc(rx_depth, sizeof(uint64_t));
 
+  /*
+  pthread_t harvest_thread;
   if (pthread_create(&harvest_thread, NULL, run_harvest_thread, this) < 0)
     FAIL("failed to create thread");
+  */
 
   unsigned quit_counter = 0;
   bool pending_flush = false;
@@ -225,6 +227,8 @@ void Proxy::rdma_loop()
 
       post_recv(wc[i].wr_id);
     }
+
+    harvest_wcs();
   }
 
   toc(TT_RDMALOOP);
@@ -235,8 +239,10 @@ void Proxy::rdma_loop()
   }
   printf("]\n");
 
+  /*
   if (pthread_join(harvest_thread, NULL))
     FAIL("join harvest thread failed");
+  */
 
   free(hist_reqs);
   
@@ -278,6 +284,7 @@ void Proxy::route_reqs(char *buf, size_t len)
   tic(TT_ROUTE);
 
   ReqBufRead reader(buf, len);
+  count_routed_bytes += len;
 
   request_head *head;
   char *data;
@@ -297,23 +304,41 @@ void Proxy::route_reqs(char *buf, size_t len)
 
     if (send_bufs->is_flushing(r.idx)) {
       tic(clock);
+      do
+        harvest_wcs();
       while (send_bufs->is_flushing(r.idx));
       toc(clock);
     }
 
-    while (!send_bufs->reqs(r.idx).append(*head, data))
-      if (r.remote)
-        flush_remote(r.idx);
-      else
-        flush_local(r.idx);
+    ReqBufWrite& req = send_bufs->reqs(r.idx);
+    if (!req.append(*head, data)) {
+      tic(TT_APPBLOCK);
+      do {
+        if (send_bufs->is_flushing(r.idx))
+          harvest_wcs();
+        else
+          flush(r);
+      } while (!req.append(*head, data));
+      toc(TT_APPBLOCK);
+    }
   }
 
   toc(TT_ROUTE);
 }
 
+void Proxy::flush(route r)
+{
+  if (r.remote)
+    flush_remote(r.idx);
+  else
+    flush_local(r.idx);
+}
+
 void Proxy::flush_remote(unsigned idx)
 {
-  if (d2d_send.is_flushing(idx) || d2d_send.reqs(idx).empty())
+  assert(!d2d_send.is_flushing(idx));
+
+  if (d2d_send.reqs(idx).empty())
     return;
 
   tic(TT_REMFLUSH);
@@ -331,7 +356,9 @@ void Proxy::flush_remote(unsigned idx)
 
 void Proxy::flush_local(unsigned idx)
 {
-  if (d2h_send.is_flushing(idx) || d2h_send.reqs(idx).empty())
+  assert(!d2h_send.is_flushing(idx));
+
+  if (d2h_send.reqs(idx).empty())
     return;
 
   tic(TT_LOCFLUSH);
@@ -349,10 +376,12 @@ void Proxy::flush_local(unsigned idx)
 void Proxy::flush_all()
 {
   for (unsigned i = 0; i < num_clients; i++)
-    flush_local(i);
+    if (!d2h_send.is_flushing(i))
+      flush_local(i);
 
   for (unsigned i = 0; i < num_remotes; i++)
-    flush_remote(i);
+    if (!d2d_send.is_flushing(i))
+      flush_remote(i);
 }
 
 SendBufs::SendBufs(unsigned n, unsigned size)
@@ -367,7 +396,8 @@ SendBufs::SendBufs(unsigned n, unsigned size)
   for (unsigned i = 0; i < n; i++)
     new (&reqbufs[i]) ReqBufWrite(buf + offset(i), size);
 
-  flushing = new std::atomic_bool[n];
+  //flushing = new std::atomic_bool[n];
+  flushing = new bool[n];
   for (unsigned i = 0; i < n; i++)
     flushing[i] = false;
 }

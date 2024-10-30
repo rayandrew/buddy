@@ -72,7 +72,8 @@ class SendBufs {
     unsigned size;
     ibv_mr *mr_;
     ReqBufWrite *reqbufs;
-    std::atomic_bool *flushing;
+    //std::atomic_bool *flushing;
+    bool *flushing;
 };
 
 class Proxy {
@@ -104,6 +105,8 @@ class Proxy {
 
     route *routing_table;
 
+    size_t count_routed_bytes = 0;
+
     void post_recv(uint64_t wr_id);
 
     void harvest_wcs();
@@ -111,6 +114,7 @@ class Proxy {
 
     void route_reqs(char *buf, size_t len);
     void flush_all();
+    void flush(route r);
     void flush_local(unsigned idx);
     void flush_remote(unsigned idx);
 };
