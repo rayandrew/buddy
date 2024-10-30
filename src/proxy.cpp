@@ -4,7 +4,11 @@
 #include "local_proto.h"
 #include "valgrind/memcheck.h"
 
+#ifdef NDEBUG
+#define TRACE(x) do{}while(0)
+#else
 #define TRACE(x) do{if (config.trace){std::clog << x << std::endl;}}while(0)
+#endif
 
 enum tt_clock {
   TT_RDMALOOP,
