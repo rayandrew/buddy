@@ -1,6 +1,6 @@
 #include <iostream>
+#include <cassert>
 #include "buddy.h"
-#include "host_buffer.h"
 #include "dpu_conn.h"
 #include "util.h"
 #include "rdma.h"

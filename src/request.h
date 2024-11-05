@@ -2,14 +2,13 @@
 
 #include <cstddef>
 #include <cassert>
+#include <stdint.h>
 
 namespace buddy {
 
 struct request_head {
-  size_t size;
-  int src;
-  int dst;
-  int tag;
+  uint32_t size;
+  int32_t dst;
 };
 
 class ReqBufRead {

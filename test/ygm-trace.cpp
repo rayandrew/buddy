@@ -90,7 +90,7 @@ class TracePlayer {
         actual_recv_count++;
 
         if (validate)
-          actual_recv.push_back({.count = check_count ? head->size : 0, .source = head->src});
+          actual_recv.push_back({.count = check_count ? head->size : 0});
       }
     }
 
@@ -109,7 +109,6 @@ class TracePlayer {
 
       buddy::request_head head = {
         .size = count,
-        .src = source,
         .dst = dest,
       };
 
