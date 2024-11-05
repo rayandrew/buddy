@@ -254,8 +254,7 @@ void Proxy::rdma_loop()
 
   free(hist_reqs);
   
-  std::cout << "--- proxy breakdown" << " ---" << std::endl;
-  tt_print();
+  tt_print("proxy breakdown");
 }
 
 void Proxy::post_recv(uint64_t wr_id)

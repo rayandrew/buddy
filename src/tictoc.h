@@ -65,9 +65,11 @@ static double tt_overhead()
 }
 #endif
 
-static inline void tt_print()
+static inline void tt_print(const char *title)
 {
 #ifdef TICTOC
+  std::cout << "--- " << title << " ---" << std::endl;
+
   for (int i = 0; i < TT_COUNT; i++) {
     auto t = std::chrono::duration_cast<std::chrono::duration<double>>(tt_duration[i]);
     std::cout << tt_label[i] << '\t' << t.count() << '\t' << tt_calls[i] << std::endl;
