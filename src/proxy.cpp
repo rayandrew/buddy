@@ -44,7 +44,12 @@ Proxy::~Proxy()
   CHECK(!ibv_dereg_mr(h2d_mr));
   delete[] h2d_buf;
 
-  std::cout << "routed bytes: " << count_routed_bytes << std::endl;
+  std::cout << "--- network bytes ---" << std::endl;
+  std::cout << "in_local\t" << count_in_local << std::endl;
+  std::cout << "in_remote\t" << count_in_remote << std::endl;
+  std::cout << "out_local\t" << count_out_local << std::endl;
+  std::cout << "out_remote\t" << count_out_remote << std::endl;
+  std::cout << "---------------------" << std::endl;
 }
 
 Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
@@ -208,6 +213,7 @@ void Proxy::rdma_loop()
         case IMM_H2D_RDMA:
           {
             TRACE("recv H2D_RDMA size " << msglen);
+            count_in_local += msglen;
             route_reqs(recv_buf, msglen);
             pending_flush = true;
             break;
@@ -216,6 +222,7 @@ void Proxy::rdma_loop()
         case IMM_D2D_RDMA:
           {
             TRACE("recv D2D_RDMA size " << msglen);
+            count_in_remote += msglen;
             route_reqs(recv_buf, msglen);
             pending_flush = true;
             break;
@@ -285,7 +292,6 @@ void Proxy::route_reqs(char *buf, size_t len)
   tic(TT_ROUTE);
 
   ReqBufRead reader(buf, len);
-  count_routed_bytes += len;
 
   request_head *head;
   char *data;
@@ -295,11 +301,14 @@ void Proxy::route_reqs(char *buf, size_t len)
 
     auto clock = TT_D2HBLOCK;
     auto send_bufs = &d2h_send;
+    size_t bytes = sizeof(request_head) + head->size;
     if (r.remote) {
+      count_out_remote += bytes;
       clock = TT_D2DBLOCK;
       send_bufs = &d2d_send;
       TRACE("route to " << head->dst << " (remote " << r.idx << ")");
     } else {
+      count_out_local += bytes;
       TRACE("route to " << head->dst << " (local " << r.idx << ")");
     }
 

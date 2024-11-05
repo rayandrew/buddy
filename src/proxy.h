@@ -105,7 +105,10 @@ class Proxy {
 
     route *routing_table;
 
-    size_t count_routed_bytes = 0;
+    size_t count_in_local = 0;
+    size_t count_in_remote = 0;
+    size_t count_out_local = 0;
+    size_t count_out_remote = 0;
 
     void post_recv(uint64_t wr_id);
 
