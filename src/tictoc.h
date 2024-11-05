@@ -65,7 +65,7 @@ static double tt_overhead()
 }
 #endif
 
-static void tt_print()
+static inline void tt_print()
 {
 #ifdef TICTOC
   for (int i = 0; i < TT_COUNT; i++) {
@@ -78,7 +78,7 @@ static void tt_print()
 }
 
 #ifdef MPI_VERSION
-static void tt_print_mpi(const char *title)
+static inline void tt_print_mpi(const char *title)
 {
 #ifdef TICTOC
   double ts[TT_COUNT+1];

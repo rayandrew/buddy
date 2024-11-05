@@ -56,6 +56,7 @@ enum tt_clock {
   TT_COUNT,
 };
 
+__attribute__((unused))
 static const char *tt_label[TT_COUNT] = {
   "push",
   "pull",
