@@ -197,7 +197,7 @@ poll:
             tic(TT_BUFPROC);
             buddy::request_head *head;
             char *data;
-            while (reader.next(&head, &data, -1)) {
+            while (reader.next(&head, &data)) {
               assert(head->size == sizeof(long));
               long* local = (long *)data;
               counts[*local] += 1;

@@ -294,7 +294,7 @@ void Proxy::route_reqs(char *buf, size_t len)
 
   request_head *head;
   char *data;
-  while (reader.next(&head, &data, -1)) {
+  while (reader.next(&head, &data)) {
     CHECK(head->dst >= 0 && head->dst < world_size);
     route r = routing_table[head->dst];
 

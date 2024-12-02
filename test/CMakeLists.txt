@@ -1,13 +1,27 @@
-if(NOT MPI_FOUND)
-	return()
-endif()
-
 add_executable(ygm-trace ygm-trace.cpp)
 target_link_libraries(ygm-trace PRIVATE buddy absl::flat_hash_map)
 
 add_executable(histo histo.cpp)
 target_link_libraries(histo PRIVATE buddy)
 target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)
+
+add_executable(route_inl_serial route.cpp)
+target_link_libraries(route_inl_serial PRIVATE buddy)
+target_compile_definitions(route_inl_serial PRIVATE INLINE=1)
+
+add_executable(route_sep_serial route.cpp)
+target_link_libraries(route_sep_serial PRIVATE buddy)
+
+find_package(OpenMP)
+if (OpenMP_CXX_FOUND)
+    add_executable(route_sep_atomic route.cpp)
+    target_link_libraries(route_sep_atomic PRIVATE buddy OpenMP::OpenMP_CXX)
+    target_compile_definitions(route_sep_atomic PRIVATE ATOMIC_OUT=1)
+
+    add_executable(route_sep_iso route.cpp)
+    target_link_libraries(route_sep_iso PRIVATE buddy OpenMP::OpenMP_CXX)
+    target_compile_definitions(route_sep_iso PRIVATE SEPARATE_OUT=1)
+endif()
 
 return()
 
