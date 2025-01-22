@@ -52,8 +52,30 @@ struct route {
   }
 };
 
+struct send_buf_id {
+  route rt;
+  uint32_t tid;
+
+  inline uint64_t as_int()
+  {
+    uint64_t x = 0;
+    static_assert(sizeof(x) == sizeof(*this));
+    memcpy(&x, this, sizeof(x));
+    return x;
+  }
+
+  static send_buf_id from_int(uint64_t u64)
+  {
+    send_buf_id id = {};
+    static_assert(sizeof(id) == sizeof(u64));
+    memcpy(&id, &u64, sizeof(id));
+    return id;
+  }
+};
+
 class SendBufs {
   public:
+    SendBufs() { memset(this, 0, sizeof(*this)); }
     SendBufs(unsigned n, unsigned size);
     ~SendBufs();
 
@@ -72,8 +94,8 @@ class SendBufs {
     unsigned size;
     ibv_mr *mr_;
     ReqBufWrite *reqbufs;
-    //std::atomic_bool *flushing;
-    bool *flushing;
+    std::atomic_bool *flushing;
+    //bool *flushing;
 };
 
 class Proxy {
@@ -93,29 +115,22 @@ class Proxy {
     const int world_size;
     rdma::QP *local_qps;
     rdma::QP *remote_qps;
-    std::atomic_bool quit;
     const size_t rx_depth;
 
     ibv_mr *h2d_mr;
     absl::flat_hash_map<unsigned, unsigned> qp_num_to_idx;
     int *local_idx_to_rank;
 
-    SendBufs d2h_send;
-    SendBufs d2d_send;
+    SendBufs *d2h_send;
+    SendBufs *d2d_send;
 
     route *routing_table;
 
-    size_t count_in_local = 0;
-    size_t count_in_remote = 0;
-    size_t count_out_local = 0;
-    size_t count_out_remote = 0;
-
     void post_recv(uint64_t wr_id);
 
-    void harvest_wcs();
-    friend void *run_harvest_thread(void *arg);
+    void poll_send_queue();
 
-    void route_reqs(char *buf, size_t len);
+    void route_reqs(char *buf, size_t len, uint64_t *count_out_local, uint64_t *count_out_remote);
     void flush_all();
     void flush(route r);
     void flush_local(unsigned idx);

@@ -24,3 +24,6 @@ target_link_libraries(buddy PUBLIC MPI::MPI_C)
 
 add_executable(buddy-proxy ${common_src} proxy_main.cpp proxy.cpp)
 target_link_libraries(buddy-proxy PRIVATE buddy_common)
+if(OpenMP_CXX_FOUND)
+	target_link_libraries(buddy-proxy PRIVATE OpenMP::OpenMP_CXX)
+endif()

@@ -12,7 +12,6 @@ target_compile_definitions(route_inl_serial PRIVATE INLINE=1)
 add_executable(route_sep_serial route.cpp)
 target_link_libraries(route_sep_serial PRIVATE buddy)
 
-find_package(OpenMP)
 if (OpenMP_CXX_FOUND)
     add_executable(route_sep_atomic route.cpp)
     target_link_libraries(route_sep_atomic PRIVATE buddy OpenMP::OpenMP_CXX)
