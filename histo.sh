@@ -4,7 +4,7 @@ set -ex
 
 : ${ploc?}
 : ${pcore?}
-: ${omp_bind:=1}
+: ${omp_bind?}
 : ${freq:=3500}
 
 : ${JDB_CWD:=.}
@@ -12,14 +12,15 @@ set -ex
 build="$JDB_CWD"/host-rel
 dpu_build="$JDB_CWD"/dpu-rel
 
-env="env OMP_NUM_THREADS=$pcore"
-if [ "$omp_bind" != 0 ]; then
-    env="$env OMP_PROC_BIND=true"
-fi
+env="env OMP_NUM_THREADS=$pcore OMP_PROC_BIND=$omp_bind"
 
 case "$ploc" in
     sock)
         $env numactl -N0 "$build"/src/buddy-proxy > proxy.log &
+        export BUDDY_DPU=localhost
+        ;;
+    corun)
+        $env numactl -N1 "$build"/src/buddy-proxy > proxy.log &
         export BUDDY_DPU=localhost
         ;;
     dpu)
