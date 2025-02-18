@@ -13,6 +13,7 @@ struct ProxyConfig {
   bool trace = false;
   int h2d_size;
   int d2h_size;
+  double timeout;
 };
 
 struct route {

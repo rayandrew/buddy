@@ -321,21 +321,35 @@ void Proxy::route_reqs(char *buf, size_t len, uint64_t *count_out_local, uint64_
 
     if (send_bufs->is_flushing(r.idx)) {
       tic(clock);
-      do
+
+      double t0 = omp_get_wtime();
+      for (;;) {
         poll_send_queue();
-      while (send_bufs->is_flushing(r.idx));
+        if (!send_bufs->is_flushing(r.idx))
+          break;
+
+        if (config.timeout >= 0 && omp_get_wtime() - t0 > config.timeout)
+          FAIL("Timed out waiting for flush to complete");
+      }
+
       toc(clock);
     }
 
     ReqBufWrite& req = send_bufs->reqs(r.idx);
     if (!req.append(*head, data)) {
       tic(TT_APPBLOCK);
+
+      double t0 = omp_get_wtime();
       do {
         if (send_bufs->is_flushing(r.idx))
           poll_send_queue();
         else
           flush(r);
+
+        if (config.timeout >= 0 && omp_get_wtime() - t0 > config.timeout)
+          FAIL("Timed out waiting to append send buffer");
       } while (!req.append(*head, data));
+
       toc(TT_APPBLOCK);
     }
   }

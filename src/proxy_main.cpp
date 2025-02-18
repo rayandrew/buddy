@@ -148,6 +148,12 @@ int main(int argc, char **argv)
   if (env)
     config.trace = atoi(env);
 
+  env = getenv("BUDDY_TIMEOUT");
+  if (env)
+    config.timeout = strtod(env, NULL);
+  else
+    config.timeout = 5.0;
+
   config.h2d_size = h2d_size;
   config.d2h_size = d2h_size;
 
