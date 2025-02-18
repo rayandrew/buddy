@@ -159,7 +159,12 @@ void Proxy::rdma_loop()
   uint64_t count_out_local = 0;
   uint64_t count_out_remote = 0;
 
-#pragma omp parallel reduction(+:count_in_local,count_in_remote,count_out_local,count_out_remote)
+  uint64_t bytes_in_local = 0;
+  uint64_t bytes_in_remote = 0;
+  uint64_t bytes_out_local = 0;
+  uint64_t bytes_out_remote = 0;
+
+#pragma omp parallel reduction(+:count_in_local,count_in_remote,count_out_local,count_out_remote,bytes_in_local,bytes_in_remote,bytes_out_local,bytes_out_remote)
   {
     int num_threads = omp_get_num_threads();
     int thread_depth = rx_depth / num_threads;
@@ -217,8 +222,11 @@ void Proxy::rdma_loop()
           case IMM_H2D_RDMA:
             {
               TRACE("recv H2D_RDMA size " << msglen);
-              count_in_local += msglen;
-              route_reqs(recv_buf, msglen, &count_out_local, &count_out_remote);
+
+              count_in_local++;
+              bytes_in_local += msglen;
+
+              route_reqs(recv_buf, msglen);
               pending_flush = true;
               break;
             }
@@ -226,8 +234,11 @@ void Proxy::rdma_loop()
           case IMM_D2D_RDMA:
             {
               TRACE("recv D2D_RDMA size " << msglen);
-              count_in_remote += msglen;
-              route_reqs(recv_buf, msglen, &count_out_local, &count_out_remote);
+
+              count_in_remote++;
+              bytes_in_remote += msglen;
+
+              route_reqs(recv_buf, msglen);
               pending_flush = true;
               break;
             }
@@ -243,23 +254,49 @@ void Proxy::rdma_loop()
       poll_send_queue();
     }
 
+    int tid = omp_get_thread_num();
+    d2h_send[tid].get_counts(&count_out_local, &bytes_out_local);
+    d2d_send[tid].get_counts(&count_out_remote, &bytes_out_remote);
+
     toc(TT_RDMALOOP);
   }
 
+  uint64_t nnz = rx_depth;
+  while (nnz && !hist_reqs[nnz-1])
+    nnz--;
+
   printf("hist_reqs = [");
-  for (uint64_t i = 0; i < rx_depth; i++) {
+  for (uint64_t i = 0; i < nnz; i++) {
     printf("%lu,", hist_reqs[i].load());
   }
   printf("]\n");
 
   delete[] hist_reqs;
 
+  std::cout << "--- msg counts ---" << std::endl;
+  std::cout << "count_in_local\t" << count_in_local << std::endl;
+  std::cout << "count_in_remote\t" << count_in_remote << std::endl;
+  std::cout << "count_out_local\t" << count_out_local << std::endl;
+  std::cout << "count_out_remote\t" << count_out_remote << std::endl;
+  std::cout << "------------------" << std::endl;
+
   std::cout << "--- network bytes ---" << std::endl;
-  std::cout << "in_local\t" << count_in_local << std::endl;
-  std::cout << "in_remote\t" << count_in_remote << std::endl;
-  std::cout << "out_local\t" << count_out_local << std::endl;
-  std::cout << "out_remote\t" << count_out_remote << std::endl;
+  std::cout << "bytes_in_local\t" << bytes_in_local << std::endl;
+  std::cout << "bytes_in_remote\t" << bytes_in_remote << std::endl;
+  std::cout << "bytes_out_local\t" << bytes_out_local << std::endl;
+  std::cout << "bytes_out_remote\t" << bytes_out_remote << std::endl;
   std::cout << "---------------------" << std::endl;
+
+  std::cout << "--- avg msg size ---" << std::endl;
+  if (count_in_local)
+    std::cout << "avg_in_local\t" << bytes_in_local/count_in_local << std::endl;
+  if (count_in_remote)
+    std::cout << "avg_in_remote\t" << bytes_in_remote/count_in_remote << std::endl;
+  if (count_out_local)
+    std::cout << "avg_out_local\t" << bytes_out_local/count_out_local << std::endl;
+  if (count_out_remote)
+    std::cout << "avg_out_remote\t" << bytes_out_remote/count_out_remote << std::endl;
+  std::cout << "--------------------" << std::endl;
 
   tt_print("proxy breakdown");
 }
@@ -293,7 +330,7 @@ void Proxy::post_recv(uint64_t wr_id)
   }
 }
 
-void Proxy::route_reqs(char *buf, size_t len, uint64_t *count_out_local, uint64_t *count_out_remote)
+void Proxy::route_reqs(char *buf, size_t len)
 {
   tic(TT_ROUTE);
 
@@ -308,14 +345,11 @@ void Proxy::route_reqs(char *buf, size_t len, uint64_t *count_out_local, uint64_
 
     auto clock = TT_D2HBLOCK;
     auto send_bufs = &d2h_send[tid];
-    size_t bytes = sizeof(request_head) + head->size;
     if (r.remote) {
-      *count_out_remote += bytes;
       clock = TT_D2DBLOCK;
       send_bufs = &d2d_send[tid];
       TRACE("route to " << head->dst << " (remote " << r.idx << ")");
     } else {
-      *count_out_local += bytes;
       TRACE("route to " << head->dst << " (local " << r.idx << ")");
     }
 

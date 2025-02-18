@@ -88,6 +88,16 @@ class SendBufs {
     {
       assert(flushing[i] != x);
       flushing[i] = x;
+
+      if (x) {
+        flush_count++;
+        total_bytes += reqbufs[i].get_pos();
+      }
+    }
+    void get_counts(uint64_t *count, uint64_t *bytes)
+    {
+      *count = flush_count;
+      *bytes = total_bytes;
     }
 
   private:
@@ -97,6 +107,9 @@ class SendBufs {
     ReqBufWrite *reqbufs;
     std::atomic_bool *flushing;
     //bool *flushing;
+
+    uint64_t flush_count;
+    uint64_t total_bytes;
 };
 
 class Proxy {
@@ -131,7 +144,7 @@ class Proxy {
 
     void poll_send_queue();
 
-    void route_reqs(char *buf, size_t len, uint64_t *count_out_local, uint64_t *count_out_remote);
+    void route_reqs(char *buf, size_t len);
     void flush_all();
     void flush(route r);
     void flush_local(unsigned idx);
