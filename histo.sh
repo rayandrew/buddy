@@ -1,13 +1,15 @@
 #!/bin/bash
 
-set -ex
+set -Eexo pipefail
 
 : ${ploc?}
 : ${pcore?}
 : ${omp_bind?}
 : ${freq:=3500}
+: ${bins:=10000}
+: ${load:=10000000}
 
-: ${JDB_CWD:=.}
+: ${JDB_CWD:=$PWD}
 
 build="$JDB_CWD"/host-rel
 dpu_build="$JDB_CWD"/dpu-rel
@@ -37,7 +39,7 @@ if [ "$freq" != 3500 ]; then
     sudo cpupower -c "$node1" frequency-set -u "$freq"MHz
 fi
 
-mpirun -np 16 numactl -N1 "$build"/test/histo 10000 10000000 1 > histo.log
+mpirun -np 16 numactl -N1 "$build"/test/histo "$bins" "$load" 1 > histo.log
 
 wait
 
@@ -45,7 +47,5 @@ if [ "$freq" != 3500 ]; then
     sudo cpupower -c "$node1" frequency-set -u 3500MHz
 fi
 
-grep -qF 'RESULT: 0[5962] = 1137
-RESULT: 4[1774] = 1133
-RESULT: 11[4778] = 1162
-RESULT: 1[4807] = 1131' histo.log
+expect="$(< "$JDB_CWD/test/histo-result/16_${bins}_${load}_1")"
+grep -qF "$expect" histo.log
