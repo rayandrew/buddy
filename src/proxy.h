@@ -10,10 +10,11 @@
 namespace buddy::dpu {
 
 struct ProxyConfig {
-  bool trace = false;
-  int h2d_size;
-  int d2h_size;
-  double timeout;
+  unsigned trace = 0;
+  unsigned h2d_size = 0;
+  unsigned d2h_size = 0;
+  unsigned d2d_size = 64*1024*1024;
+  double timeout = 5.0;
 };
 
 struct route {
@@ -87,12 +88,13 @@ class SendBufs {
     void set_flushing(unsigned i, bool x)
     {
       assert(flushing[i] != x);
-      flushing[i] = x;
 
       if (x) {
         flush_count++;
         total_bytes += reqbufs[i].get_pos();
       }
+
+      flushing[i] = x;
     }
     void get_counts(uint64_t *count, uint64_t *bytes)
     {
@@ -112,9 +114,30 @@ class SendBufs {
     uint64_t total_bytes;
 };
 
+struct proxy_cqs {
+  ibv_srq *local_srq;
+  ibv_srq *remote_srq;
+  ibv_cq *send;
+  ibv_cq *local_recv;
+  ibv_cq *remote_recv;
+};
+
+struct rdma_counters {
+  uint64_t count_local = 0;
+  uint64_t count_remote = 0;
+  uint64_t bytes_local = 0;
+  uint64_t bytes_remote = 0;
+};
+
+struct blocked_req {
+  route recv_rt;
+  ReqBufRead reqbuf;
+  double deadline;
+};
+
 class Proxy {
   public:
-    Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
+    Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
         unsigned num_remotes, int world_size,
         rdma::QP *local_qps, rdma::QP *remote_qps,
         int *ranks, route *routing_table);
@@ -123,16 +146,21 @@ class Proxy {
 
   private:
     const ProxyConfig config;
-    rdma::server_cqs cqs;
     const unsigned num_clients;
     const unsigned num_remotes;
     const int world_size;
+
+    proxy_cqs cqs;
     rdma::QP *local_qps;
     rdma::QP *remote_qps;
+
+    const size_t h2d_depth;
+    const size_t d2d_depth;
     const size_t rx_depth;
 
     ibv_mr *h2d_mr;
-    absl::flat_hash_map<unsigned, unsigned> qp_num_to_idx;
+    ibv_mr *d2d_mr;
+    //absl::flat_hash_map<unsigned, unsigned> qp_num_to_idx;
     int *local_idx_to_rank;
 
     SendBufs *d2h_send;
@@ -140,15 +168,22 @@ class Proxy {
 
     route *routing_table;
 
-    void post_recv(uint64_t wr_id);
+    std::atomic_uint quit_counter;
+    rdma_counters *in_counters = nullptr;
 
+    void post_recv(route rt);
+    char *get_recv_buf(route rt);
+
+    bool poll_recv_queue(std::list<blocked_req>& blocked_reqs);
     void poll_send_queue();
 
-    void route_reqs(char *buf, size_t len);
+    bool route_reqs(ReqBufRead& reader);
     void flush_all();
     void flush(route r);
     void flush_local(unsigned idx);
     void flush_remote(unsigned idx);
+
+    void print_counters(int num_threads);
 };
 
 } // namespace buddy::dpu

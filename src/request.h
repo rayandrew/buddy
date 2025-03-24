@@ -48,6 +48,8 @@ class ReqBufRead {
     }
 
     bool next(request_head **head, char **data);
+    bool peek(request_head **head, char **data);
+    void advance(request_head *head);
 
   private:
     char *buf;

@@ -6,6 +6,16 @@ namespace buddy {
 
 bool ReqBufRead::next(request_head **out_head, char **out_data)
 {
+  if (peek(out_head, out_data)) {
+      advance(*out_head);
+      return true;
+  }
+
+  return false;
+}
+
+bool ReqBufRead::peek(request_head **out_head, char **out_data)
+{
   if (pos + sizeof(request_head) > len) {
     assert(pos == len);
     return false;
@@ -14,13 +24,16 @@ bool ReqBufRead::next(request_head **out_head, char **out_data)
   request_head *pos_head = reinterpret_cast<request_head*>(buf+pos);
   char *data = reinterpret_cast<char*>(pos_head+1);
 
-  pos += sizeof(request_head) + pos_head->size;
-  assert(pos <= len);
-
   *out_head = pos_head;
   *out_data = data;
 
   return true;
+}
+
+void ReqBufRead::advance(request_head *head)
+{
+  pos += sizeof(request_head) + head->size;
+  assert(pos <= len);
 }
 
 char *ReqBufWrite::append_head(request_head head)

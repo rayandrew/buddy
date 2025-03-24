@@ -89,13 +89,14 @@ int main(int argc, char **argv)
 
   close(lsock);
 
-  buddy::rdma::server_cqs cqs;
+  auto local_cqs = buddy::rdma::server_cqs::create();
+  auto remote_cqs = local_cqs.duplicate_send();
 
   auto routing_table = new buddy::dpu::route[world_size];
 
   auto local_qps = new buddy::rdma::QP[conn_count];
   for (int i = 0; i < conn_count; i++) {
-    new (&local_qps[i]) buddy::rdma::QP(cqs, conn_list[i]);
+    new (&local_qps[i]) buddy::rdma::QP(local_cqs, conn_list[i]);
     routing_table[ranks[i]] = buddy::dpu::route::make_local(i);
   }
 
@@ -125,7 +126,7 @@ int main(int argc, char **argv)
       }
       CHECK(socket >= 0);
 
-      remote_qps.emplace_back(cqs, socket, inverse);
+      remote_qps.emplace_back(remote_cqs, socket, inverse);
       close(socket);
     }
 
@@ -151,11 +152,17 @@ int main(int argc, char **argv)
   env = getenv("BUDDY_TIMEOUT");
   if (env)
     config.timeout = strtod(env, NULL);
-  else
-    config.timeout = 5.0;
 
   config.h2d_size = h2d_size;
   config.d2h_size = d2h_size;
+
+  buddy::dpu::proxy_cqs cqs = {
+    .local_srq = local_cqs.srq,
+    .remote_srq = remote_cqs.srq,
+    .send = local_cqs.send,
+    .local_recv = local_cqs.recv,
+    .remote_recv = remote_cqs.recv,
+  };
 
   buddy::dpu::Proxy proxy(config, cqs, conn_count, remote_qps.size(), world_size,
       local_qps, remote_qps.data(),
@@ -175,7 +182,12 @@ int main(int argc, char **argv)
 
   delete[] local_qps;
   remote_qps.clear();
-  cqs.destroy();
+
+  CHECK(!ibv_destroy_cq(cqs.send));
+  CHECK(!ibv_destroy_cq(cqs.local_recv));
+  CHECK(!ibv_destroy_cq(cqs.remote_recv));
+  CHECK(!ibv_destroy_srq(cqs.local_srq));
+  CHECK(!ibv_destroy_srq(cqs.remote_srq));
 
   delete[] routing_table;
 }

@@ -13,8 +13,9 @@ struct IBDest {
 };
 
 struct server_cqs {
-  server_cqs();
+  static server_cqs create();
   void destroy();
+  server_cqs duplicate_send();
 
   ibv_srq *srq;
   ibv_cq *send;

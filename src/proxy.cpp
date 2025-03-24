@@ -6,9 +6,9 @@
 #include "valgrind/memcheck.h"
 
 #ifdef NDEBUG
-#define TRACE(x) do{}while(0)
+#define TRACE(l, x) do{}while(0)
 #else
-#define TRACE(x) do{if (config.trace){std::clog << x << std::endl;}}while(0)
+#define TRACE(l, x) do{if (config.trace >= (l)){std::clog << x << std::endl;}}while(0)
 #endif
 
 enum tt_clock {
@@ -44,20 +44,26 @@ Proxy::~Proxy()
   char *h2d_buf = (char *)h2d_mr->addr;
   CHECK(!ibv_dereg_mr(h2d_mr));
   delete[] h2d_buf;
+
+  char *d2d_buf = (char *)d2d_mr->addr;
+  CHECK(!ibv_dereg_mr(d2d_mr));
+  delete[] d2d_buf;
 }
 
-Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
+Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     unsigned num_remotes, int world_size,
     rdma::QP *local_qps, rdma::QP *remote_qps,
     int *ranks, route *routing_table)
   : config(config)
-  , cqs(cqs)
   , num_clients(num_clients)
   , num_remotes(num_remotes)
   , world_size(world_size)
+  , cqs(cqs)
   , local_qps(local_qps)
   , remote_qps(remote_qps)
-  , rx_depth(4*num_clients)
+  , h2d_depth(4*num_clients)
+  , d2d_depth(4*num_remotes)
+  , rx_depth(h2d_depth + d2d_depth)
   , local_idx_to_rank(ranks)
   , routing_table(routing_table)
 {
@@ -68,6 +74,8 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
 
 #pragma omp single
     {
+      in_counters = new rdma_counters[num_threads];
+
       d2h_send = new SendBufs[num_threads];
       d2d_send = new SendBufs[num_threads];
     }
@@ -77,26 +85,35 @@ Proxy::Proxy(ProxyConfig config, rdma::server_cqs cqs, unsigned num_clients,
     new (&d2d_send[tid]) SendBufs(num_remotes, config.h2d_size);
   }
 
-  size_t total_size = config.h2d_size * rx_depth;
-  CHECK(total_size);
-  char *h2d_buf = new char[total_size];
-
-  h2d_mr = ibv_reg_mr(rdma::Context::get().get_pd(), h2d_buf, total_size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+  size_t total_size_h2d = config.h2d_size * h2d_depth;
+  CHECK(total_size_h2d);
+  char *h2d_buf = new char[total_size_h2d];
+  h2d_mr = ibv_reg_mr(rdma::Context::get().get_pd(), h2d_buf, total_size_h2d, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
   CHECK(h2d_mr);
 
+  size_t total_size_d2d = config.d2d_size * d2d_depth;
+  CHECK(!num_remotes || total_size_d2d);
+  char *d2d_buf = new char[total_size_d2d];
+  d2d_mr = ibv_reg_mr(rdma::Context::get().get_pd(), d2d_buf, total_size_d2d, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+  CHECK(d2d_mr);
+
+  /*
   for (unsigned i = 0; i < num_clients; i++)
     qp_num_to_idx[local_qps[i].get_qp()->qp_num] = i;
+  */
 
   std::cout << "ranks:";
   for (unsigned i = 0; i < num_clients; i++)
     std::cout << " " << ranks[i];
   std::cout << std::endl;
 
-  for (uint64_t wr_id = 0; wr_id < rx_depth; wr_id++) {
-    post_recv(wr_id);
-  }
+  for (uint32_t i = 0; i < h2d_depth; i++)
+    post_recv(route::make_local(i));
 
-  TRACE("trace on");
+  for (uint32_t i = 0; i < d2d_depth; i++)
+    post_recv(route::make_remote(i));
+
+  TRACE(1, "trace on");
 }
 
 void Proxy::poll_send_queue()
@@ -146,214 +163,279 @@ void Proxy::poll_send_queue()
   }
 }
 
+bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
+{
+  // To avoid deadlock situation where a d2d recv is blocked by earlier h2d
+  // recvs we should only take 1 wc from the queue at once.
+  // TODO: not relevant anymore.
+  ibv_wc wc;
+
+  tic(TT_POLL);
+
+  // Prioritize remote recvs first. To rate limit fast hosts.
+  int n = ibv_poll_cq(cqs.remote_recv, 1, &wc);
+  CHECK(n >= 0);
+
+  if (!n) {
+    n = ibv_poll_cq(cqs.local_recv, 1, &wc);
+    CHECK(n >= 0);
+  }
+
+  if (!n)
+    return false;
+  else
+    assert(n == 1);
+
+  toc(TT_POLL);
+
+  CHECK(wc.status == IBV_WC_SUCCESS);
+  CHECK(wc.opcode == IBV_WC_RECV || wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM);
+  CHECK(wc.wc_flags & IBV_WC_WITH_IMM);
+
+  uint32_t imm_tag = wc.imm_data;
+  switch (imm_tag) {
+    case IMM_QUIT:
+      {
+        quit_counter++;
+        break;
+      }
+
+    case IMM_H2D_RDMA:
+    case IMM_D2D_RDMA:
+      {
+        uint64_t wr_id = wc.wr_id;
+        route recv_rt = route::from_int(wr_id);
+
+        char *recv_buf = get_recv_buf(recv_rt);
+        size_t msglen = wc.byte_len;
+        VALGRIND_MAKE_MEM_DEFINED(recv_buf, msglen);
+
+        int tid = omp_get_thread_num();
+
+        if (imm_tag == IMM_H2D_RDMA) {
+          TRACE(1, "recv H2D_RDMA size " << msglen);
+          assert(!recv_rt.remote);
+
+          in_counters[tid].count_local++;
+          in_counters[tid].bytes_local += msglen;
+        } else {
+          TRACE(1, "recv D2D_RDMA size " << msglen);
+          assert(recv_rt.remote);
+
+          in_counters[tid].count_remote++;
+          in_counters[tid].bytes_remote += msglen;
+        }
+
+        ReqBufRead reader(recv_buf, msglen);
+        if (route_reqs(reader))
+          post_recv(recv_rt);
+        else {
+          blocked_req br = {recv_rt, reader, omp_get_wtime() + config.timeout};
+          blocklist.push_back(br);
+        }
+
+        break;
+      }
+
+    default:
+      FAIL("unknown imm_tag for recv " << imm_tag);
+      break;
+  }
+
+  return true;
+}
+
 void Proxy::rdma_loop()
 {
-  auto *hist_reqs = new std::atomic_uint64_t[rx_depth];
-  for (unsigned i = 0; i < rx_depth; i++)
-    hist_reqs[i] = 0;
+  quit_counter = 0;
 
-  std::atomic_uint quit_counter(0);
+  int num_threads = 0;
+  size_t max_blocked = 0;
 
-  uint64_t count_in_local = 0;
-  uint64_t count_in_remote = 0;
-  uint64_t count_out_local = 0;
-  uint64_t count_out_remote = 0;
-
-  uint64_t bytes_in_local = 0;
-  uint64_t bytes_in_remote = 0;
-  uint64_t bytes_out_local = 0;
-  uint64_t bytes_out_remote = 0;
-
-#pragma omp parallel reduction(+:count_in_local,count_in_remote,count_out_local,count_out_remote,bytes_in_local,bytes_in_remote,bytes_out_local,bytes_out_remote)
+#pragma omp parallel reduction(max:max_blocked)
   {
-    int num_threads = omp_get_num_threads();
-    int thread_depth = rx_depth / num_threads;
-
-    bool pending_flush = false;
+    //bool pending_flush = false;
+    std::list<blocked_req> blocklist;
 
 #pragma omp barrier
 #pragma omp single
-    std::cout << num_threads << " rdma threads ready" << std::endl;
+    {
+      num_threads = omp_get_num_threads();
+      std::cout << num_threads << " rdma threads ready" << std::endl;
+    }
 
     tic(TT_RDMALOOP);
 
+    // Logic to drain cq after quit should not be necessary if quit is
+    // preceeded by a barrier.
     while (quit_counter != num_clients) {
-      ibv_wc wc[thread_depth];
+      bool recv = poll_recv_queue(blocklist);
+      /*
+      if (recv)
+        pending_flush = true;
 
-      tic(TT_POLL);
-
-      int n = ibv_poll_cq(cqs.recv, thread_depth, wc);
-      CHECK(n >= 0);
-
-      if (!n && pending_flush) {
+      if (!recv && pending_flush) {
         flush_all();
         pending_flush = false;
       }
+      */
+      if (!recv)
+        flush_all();
 
-      while (n == 0 && quit_counter != num_clients) {
-        n = ibv_poll_cq(cqs.recv, thread_depth, wc);
-      }
-      CHECK(n >= 0);
+      // std::list::size is constant since C++11
+      max_blocked = std::max(blocklist.size(), max_blocked);
 
-      toc(TT_POLL);
-
-      if (n > 0)
-        hist_reqs[n-1]++;
-
-      for (int i = 0; i < n; i++) {
-        CHECK(wc[i].status == IBV_WC_SUCCESS);
-        CHECK(wc[i].opcode == IBV_WC_RECV || wc[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM);
-        CHECK(wc[i].wc_flags & IBV_WC_WITH_IMM);
-
-        uint32_t imm_tag = wc[i].imm_data;
-
-        uint64_t wr_id = wc[i].wr_id;
-        char *recv_buf = (char *)h2d_mr->addr + wr_id * config.h2d_size;
-        size_t msglen = wc[i].byte_len;
-        VALGRIND_MAKE_MEM_DEFINED(recv_buf, msglen);
-
-        switch (imm_tag) {
-          case IMM_QUIT:
-            {
-              quit_counter++;
-              break;
-            }
-
-          case IMM_H2D_RDMA:
-            {
-              TRACE("recv H2D_RDMA size " << msglen);
-
-              count_in_local++;
-              bytes_in_local += msglen;
-
-              route_reqs(recv_buf, msglen);
-              pending_flush = true;
-              break;
-            }
-
-          case IMM_D2D_RDMA:
-            {
-              TRACE("recv D2D_RDMA size " << msglen);
-
-              count_in_remote++;
-              bytes_in_remote += msglen;
-
-              route_reqs(recv_buf, msglen);
-              pending_flush = true;
-              break;
-            }
-
-          default:
-            FAIL("unknown imm_tag for recv " << imm_tag);
-            break;
-        }
-
-        post_recv(wc[i].wr_id);
+      auto req = blocklist.begin();
+      while (req != blocklist.end()) {
+        if (route_reqs(req->reqbuf)) {
+          post_recv(req->recv_rt);
+          req = blocklist.erase(req);
+        } else if (omp_get_wtime() > req->deadline) {
+          request_head *head;
+          char *data;
+          assert(req->reqbuf.peek(&head, &data));
+          FAIL("blocked request timed out after " << config.timeout << " s."
+              << " dst rank " << head->dst << "."
+              << " from route " << (req->recv_rt.remote ? "remote" : "local") << " " << req->recv_rt.idx);
+        } else
+          ++req;
       }
 
       poll_send_queue();
     }
 
-    int tid = omp_get_thread_num();
-    d2h_send[tid].get_counts(&count_out_local, &bytes_out_local);
-    d2d_send[tid].get_counts(&count_out_remote, &bytes_out_remote);
-
     toc(TT_RDMALOOP);
   }
 
-  uint64_t nnz = rx_depth;
-  while (nnz && !hist_reqs[nnz-1])
-    nnz--;
+  std::cout << "max_blocked_thread\t" << max_blocked << std::endl;
+  print_counters(num_threads);
+}
 
-  printf("hist_reqs = [");
-  for (uint64_t i = 0; i < nnz; i++) {
-    printf("%lu,", hist_reqs[i].load());
+void Proxy::print_counters(int num_threads)
+{
+  rdma_counters in_total, out_total;
+  for (int tid = 0; tid < num_threads; tid++) {
+    rdma_counters thread_out;
+    d2h_send[tid].get_counts(&thread_out.count_local, &thread_out.bytes_local);
+    d2d_send[tid].get_counts(&thread_out.count_remote, &thread_out.bytes_remote);
+
+    out_total.count_local += thread_out.count_local;
+    out_total.count_remote += thread_out.count_remote;
+    out_total.bytes_local += thread_out.bytes_local;
+    out_total.bytes_remote += thread_out.bytes_remote;
+
+    in_total.count_local += in_counters[tid].count_local;
+    in_total.count_remote += in_counters[tid].count_remote;
+    in_total.bytes_local += in_counters[tid].bytes_local;
+    in_total.bytes_remote += in_counters[tid].bytes_remote;
   }
-  printf("]\n");
-
-  delete[] hist_reqs;
 
   std::cout << "--- msg counts ---" << std::endl;
-  std::cout << "count_in_local\t" << count_in_local << std::endl;
-  std::cout << "count_in_remote\t" << count_in_remote << std::endl;
-  std::cout << "count_out_local\t" << count_out_local << std::endl;
-  std::cout << "count_out_remote\t" << count_out_remote << std::endl;
+  std::cout << "count_in_local\t" << in_total.count_local << std::endl;
+  std::cout << "count_in_remote\t" << in_total.count_remote << std::endl;
+  std::cout << "count_out_local\t" << out_total.count_local << std::endl;
+  std::cout << "count_out_remote\t" << out_total.count_remote << std::endl;
   std::cout << "------------------" << std::endl;
 
   std::cout << "--- network bytes ---" << std::endl;
-  std::cout << "bytes_in_local\t" << bytes_in_local << std::endl;
-  std::cout << "bytes_in_remote\t" << bytes_in_remote << std::endl;
-  std::cout << "bytes_out_local\t" << bytes_out_local << std::endl;
-  std::cout << "bytes_out_remote\t" << bytes_out_remote << std::endl;
+  std::cout << "bytes_in_local\t" << in_total.bytes_local << std::endl;
+  std::cout << "bytes_in_remote\t" << in_total.bytes_remote << std::endl;
+  std::cout << "bytes_out_local\t" << out_total.bytes_local << std::endl;
+  std::cout << "bytes_out_remote\t" << out_total.bytes_remote << std::endl;
   std::cout << "---------------------" << std::endl;
 
   std::cout << "--- avg msg size ---" << std::endl;
-  if (count_in_local)
-    std::cout << "avg_in_local\t" << bytes_in_local/count_in_local << std::endl;
-  if (count_in_remote)
-    std::cout << "avg_in_remote\t" << bytes_in_remote/count_in_remote << std::endl;
-  if (count_out_local)
-    std::cout << "avg_out_local\t" << bytes_out_local/count_out_local << std::endl;
-  if (count_out_remote)
-    std::cout << "avg_out_remote\t" << bytes_out_remote/count_out_remote << std::endl;
+  if (in_total.count_local)
+    std::cout << "avg_in_local\t" << in_total.bytes_local/in_total.count_local << std::endl;
+  if (in_total.count_remote)
+    std::cout << "avg_in_remote\t" << in_total.bytes_remote/in_total.count_remote << std::endl;
+  if (out_total.count_local)
+    std::cout << "avg_out_local\t" << out_total.bytes_local/out_total.count_local << std::endl;
+  if (out_total.count_remote)
+    std::cout << "avg_out_remote\t" << out_total.bytes_remote/out_total.count_remote << std::endl;
   std::cout << "--------------------" << std::endl;
 
   tt_print("proxy breakdown");
 }
 
-void Proxy::post_recv(uint64_t wr_id)
+char *Proxy::get_recv_buf(route rt)
 {
-  assert(wr_id >= 0);
-  assert(wr_id < rx_depth);
+  uint32_t len;
+  ibv_mr *mr;
 
-  uint64_t offset = wr_id * config.h2d_size;
-  uint64_t h2d_buf = (uint64_t) h2d_mr->addr;
+  if (rt.remote) {
+    mr = d2d_mr;
+    len = config.d2d_size;
+  } else {
+    mr = h2d_mr;
+    len = config.h2d_size;
+  }
+
+  char *buf = (char *)mr->addr + rt.idx * len;
+  return buf;
+}
+
+void Proxy::post_recv(route rt)
+{
+  assert(rt.idx < rx_depth);
+
+  uint32_t len;
+  uint32_t lkey;
+  ibv_srq *srq;
+
+  if (rt.remote) {
+    assert(rt.idx < d2d_depth);
+
+    lkey = d2d_mr->lkey;
+    len = config.d2d_size;
+    srq = cqs.remote_srq;
+  } else {
+    assert(rt.idx < h2d_depth);
+
+    lkey = h2d_mr->lkey;
+    len = config.h2d_size;
+    srq = cqs.local_srq;
+  }
 
   struct ibv_sge list = {
-    .addr = h2d_buf + offset,
-    .length = (uint32_t)config.h2d_size,
-    .lkey	= h2d_mr->lkey
+    .addr   = (uint64_t)get_recv_buf(rt),
+    .length = (uint32_t)len,
+    .lkey   = lkey
   };
   VALGRIND_MAKE_MEM_UNDEFINED(list.addr, list.length);
 
   struct ibv_recv_wr *bad_wr;
   struct ibv_recv_wr wr = {
-    .wr_id = wr_id,
+    .wr_id = rt.as_int(),
     .next       = NULL,
     .sg_list    = &list,
     .num_sge    = 1,
   };
 
-  if (ibv_post_srq_recv(cqs.srq, &wr, &bad_wr)) {
+  if (ibv_post_srq_recv(srq, &wr, &bad_wr)) {
     perror("ibv_post_recv");
     FAIL("failed to post recv");
   }
 }
 
-void Proxy::route_reqs(char *buf, size_t len)
+bool Proxy::route_reqs(ReqBufRead &reader)
 {
   tic(TT_ROUTE);
 
   int tid = omp_get_thread_num();
-  ReqBufRead reader(buf, len);
 
   request_head *head;
   char *data;
-  while (reader.next(&head, &data)) {
+  while (reader.peek(&head, &data)) {
     CHECK(head->dst >= 0 && head->dst < world_size);
     route r = routing_table[head->dst];
 
-    auto clock = TT_D2HBLOCK;
     auto send_bufs = &d2h_send[tid];
-    if (r.remote) {
-      clock = TT_D2DBLOCK;
+    if (r.remote)
       send_bufs = &d2d_send[tid];
-      TRACE("route to " << head->dst << " (remote " << r.idx << ")");
-    } else {
-      TRACE("route to " << head->dst << " (local " << r.idx << ")");
-    }
 
     if (send_bufs->is_flushing(r.idx)) {
+      /*
       tic(clock);
 
       double t0 = omp_get_wtime();
@@ -362,15 +444,24 @@ void Proxy::route_reqs(char *buf, size_t len)
         if (!send_bufs->is_flushing(r.idx))
           break;
 
+        poll_recv_queue();
+
         if (config.timeout >= 0 && omp_get_wtime() - t0 > config.timeout)
           FAIL("Timed out waiting for flush to complete");
       }
 
       toc(clock);
+      */
+
+      poll_send_queue();
+
+      if (send_bufs->is_flushing(r.idx))
+        return false;
     }
 
     ReqBufWrite& req = send_bufs->reqs(r.idx);
     if (!req.append(*head, data)) {
+      /*
       tic(TT_APPBLOCK);
 
       double t0 = omp_get_wtime();
@@ -380,15 +471,30 @@ void Proxy::route_reqs(char *buf, size_t len)
         else
           flush(r);
 
+        poll_recv_queue();
+
         if (config.timeout >= 0 && omp_get_wtime() - t0 > config.timeout)
           FAIL("Timed out waiting to append send buffer");
       } while (!req.append(*head, data));
 
       toc(TT_APPBLOCK);
+      */
+      flush(r);
+
+      return false;
     }
+
+    if (r.remote)
+      TRACE(2, "route to " << head->dst << " (remote " << r.idx << ")");
+    else
+      TRACE(2, "route to " << head->dst << " (local " << r.idx << ")");
+
+    reader.advance(head);
   }
 
   toc(TT_ROUTE);
+
+  return true;
 }
 
 void Proxy::flush(route r)
@@ -416,7 +522,7 @@ void Proxy::flush_remote(unsigned idx)
   route rt = route::make_remote(idx);
   send_buf_id id = {rt, (uint32_t)tid};
 
-  TRACE("send to remote " << idx << " size " << size << " thread " << tid);
+  TRACE(1, "send to remote " << idx << " size " << size << " thread " << tid);
   remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send[tid].mr(),
       size, d2d_send[tid].offset(idx), id.as_int());
 
@@ -440,7 +546,7 @@ void Proxy::flush_local(unsigned idx)
   route rt = route::make_local(idx);
   send_buf_id id = {rt, (uint32_t)tid};
 
-  TRACE("send to local rank " << local_idx_to_rank[idx] << " size " << size << " thread " << tid);
+  TRACE(1, "send to local rank " << local_idx_to_rank[idx] << " size " << size << " thread " << tid);
   local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_send[tid].mr(), size,
       d2h_send[tid].offset(idx), id.as_int());
 

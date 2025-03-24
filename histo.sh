@@ -14,6 +14,9 @@ set -Eexo pipefail
 build="$JDB_CWD"/host-rel
 dpu_build="$JDB_CWD"/dpu-rel
 
+#build="$JDB_CWD"/host-dbg
+#dpu_build="$JDB_CWD"/dpu-dbg
+
 env="env OMP_NUM_THREADS=$pcore OMP_PROC_BIND=$omp_bind"
 
 case "$ploc" in

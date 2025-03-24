@@ -135,7 +135,7 @@ void Context::init()
   memcpy(&local_dest_template.gid.raw, &gid.raw, sizeof(gid.raw));
 }
 
-server_cqs::server_cqs()
+server_cqs server_cqs::create()
 {
   ibv_srq_init_attr srq_attr = {
     .attr = {
@@ -144,21 +144,36 @@ server_cqs::server_cqs()
     },
   };
 
-  srq = ibv_create_srq(context.get_pd(), &srq_attr);
+  ibv_srq *srq = ibv_create_srq(context.get_pd(), &srq_attr);
   if (!srq) {
     perror("ibv_create_srq");
     FAIL("failed to create srq");
   }
 
-  send = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
-  recv = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+  ibv_cq *send = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+  ibv_cq *recv = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+
+  return {srq, send, recv};
 }
 
-void server_cqs::destroy()
+server_cqs server_cqs::duplicate_send()
 {
-  CHECK(!ibv_destroy_cq(send));
-  CHECK(!ibv_destroy_cq(recv));
-  CHECK(!ibv_destroy_srq(srq));
+  ibv_srq_init_attr srq_attr = {
+    .attr = {
+      .max_wr = COUNT,
+      .max_sge = 1,
+    },
+  };
+
+  ibv_srq *new_srq = ibv_create_srq(context.get_pd(), &srq_attr);
+  if (!new_srq) {
+    perror("ibv_create_srq");
+    FAIL("failed to create srq");
+  }
+
+  ibv_cq *new_recv = ibv_create_cq(context.get_ctx(), COUNT, NULL, NULL, 0);
+
+  return {new_srq, send, new_recv};
 }
 
 QP::QP(int connfd, bool same_cq)
