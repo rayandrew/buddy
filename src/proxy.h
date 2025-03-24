@@ -1,7 +1,7 @@
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
 #include <atomic>
+#include <list>
 
 #include "rdma.h"
 #include "request.h"
@@ -160,7 +160,6 @@ class Proxy {
 
     ibv_mr *h2d_mr;
     ibv_mr *d2d_mr;
-    //absl::flat_hash_map<unsigned, unsigned> qp_num_to_idx;
     int *local_idx_to_rank;
 
     SendBufs *d2h_send;

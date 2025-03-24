@@ -1,6 +1,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <cstdio>
+#include <vector>
+#include <limits.h>
 #include "sockets.h"
 #include "local_proto.h"
 #include "util.h"

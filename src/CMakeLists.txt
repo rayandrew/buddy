@@ -4,7 +4,7 @@ if(LOCAL_DMA)
 endif()
 
 add_library(buddy_common INTERFACE)
-target_link_libraries(buddy_common INTERFACE -libverbs absl::flat_hash_map)
+target_link_libraries(buddy_common INTERFACE -libverbs)
 
 if(LOCAL_DMA)
 	target_link_directories(buddy_common INTERFACE /opt/mellanox/doca/lib64 /opt/mellanox/doca/lib/aarch64-linux-gnu)
@@ -15,7 +15,7 @@ endif()
 
 #if(MPI_FOUND)
 #add_library(buddy_mpi SHARED ${common_src} buddy_mpi.cpp host_buffer.cpp dpu_conn.cpp)
-#target_link_libraries(buddy_mpi PRIVATE MPI::MPI_C buddy_common)
+#target_link_libraries(buddy_mpi PRIVATE MPI::MPI_C buddy_common absl::flat_hash_map)
 #endif()
 
 add_library(buddy SHARED ${common_src} host_api.cpp dpu_conn.cpp)

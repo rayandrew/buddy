@@ -97,11 +97,6 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   d2d_mr = ibv_reg_mr(rdma::Context::get().get_pd(), d2d_buf, total_size_d2d, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
   CHECK(d2d_mr);
 
-  /*
-  for (unsigned i = 0; i < num_clients; i++)
-    qp_num_to_idx[local_qps[i].get_qp()->qp_num] = i;
-  */
-
   std::cout << "ranks:";
   for (unsigned i = 0; i < num_clients; i++)
     std::cout << " " << ranks[i];
@@ -267,7 +262,7 @@ void Proxy::rdma_loop()
     tic(TT_RDMALOOP);
 
     // Logic to drain cq after quit should not be necessary if quit is
-    // preceeded by a barrier.
+    // preceeded by an application barrier.
     while (quit_counter != num_clients) {
       bool recv = poll_recv_queue(blocklist);
       /*
@@ -435,52 +430,14 @@ bool Proxy::route_reqs(ReqBufRead &reader)
       send_bufs = &d2d_send[tid];
 
     if (send_bufs->is_flushing(r.idx)) {
-      /*
-      tic(clock);
-
-      double t0 = omp_get_wtime();
-      for (;;) {
-        poll_send_queue();
-        if (!send_bufs->is_flushing(r.idx))
-          break;
-
-        poll_recv_queue();
-
-        if (config.timeout >= 0 && omp_get_wtime() - t0 > config.timeout)
-          FAIL("Timed out waiting for flush to complete");
-      }
-
-      toc(clock);
-      */
-
       poll_send_queue();
-
       if (send_bufs->is_flushing(r.idx))
         return false;
     }
 
     ReqBufWrite& req = send_bufs->reqs(r.idx);
     if (!req.append(*head, data)) {
-      /*
-      tic(TT_APPBLOCK);
-
-      double t0 = omp_get_wtime();
-      do {
-        if (send_bufs->is_flushing(r.idx))
-          poll_send_queue();
-        else
-          flush(r);
-
-        poll_recv_queue();
-
-        if (config.timeout >= 0 && omp_get_wtime() - t0 > config.timeout)
-          FAIL("Timed out waiting to append send buffer");
-      } while (!req.append(*head, data));
-
-      toc(TT_APPBLOCK);
-      */
       flush(r);
-
       return false;
     }
 
