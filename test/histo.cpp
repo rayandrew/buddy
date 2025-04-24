@@ -94,8 +94,8 @@ main(int argc, char* argv[])
 
   buddy_init(MPI_COMM_WORLD, MAXLEN, MAXLEN);
 
-  int num_sendbuf = 1;
-  int num_recvbuf = 1;
+  unsigned num_sendbuf = 1;
+  unsigned num_recvbuf = 1;
   char *env;
 
   env = getenv("BUDDY_SENDBUF");
@@ -115,7 +115,7 @@ main(int argc, char* argv[])
 
   buddy_buf *recv_buf = buddy_alloc(num_recvbuf*MAXLEN);
 
-  for (int i = 0; i < num_recvbuf; i++)
+  for (unsigned i = 0; i < num_recvbuf; i++)
     buddy_recv(recv_buf, MAXLEN, i*MAXLEN, num_sendbuf+i);
 
   int status = EXIT_FAILURE;
@@ -138,7 +138,8 @@ main(int argc, char* argv[])
         long payload = index / PROCS;
         long pe = index % PROCS;
 
-        buddy::request_head head = {.size = sizeof(index), .dst = pe};
+        assert(PROCS <= INT32_MAX);
+        buddy::request_head head = {.size = sizeof(index), .dst = (int32_t)pe};
         char *data;
         while (!(data = writer.append_head(head))) {
           assert(!send_busy[curr_send]);
@@ -146,7 +147,7 @@ main(int argc, char* argv[])
           send_busy[curr_send] = true;
 
           send_block = true;
-          for (int i = 1; i < num_sendbuf; i++) {
+          for (unsigned i = 1; i < num_sendbuf; i++) {
             int j = (curr_send + i) % num_sendbuf;
             if (!send_busy[j]) {
               curr_send = j;

@@ -26,7 +26,7 @@ int main(int argc, char **argv)
 
   size_t count_per_out[num_out] = {};
 
-  int num_threads = 1;
+  [[maybe_unused]] int num_threads = 1;
 #ifdef _OPENMP
 #pragma omp parallel
 #pragma omp master
@@ -46,7 +46,7 @@ int main(int argc, char **argv)
   for (size_t i = 0; i < incount; i++) {
     buddy::request_head head = {
       .size = datasize,
-      .dst = rand() % num_out,
+      .dst = (int32_t)(rand() % num_out),
     };
     count_per_out[head.dst]++;
 
@@ -97,7 +97,7 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < incount; i++) {
       buddy::request_head *head;
       char *data;
-      bool ok;
+      [[maybe_unused]] bool ok;
 
 #ifdef INLINE
       ok = inreader.next(&head, &data);

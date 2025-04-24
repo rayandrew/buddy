@@ -288,7 +288,7 @@ void Proxy::rdma_loop()
         } else if (omp_get_wtime() > req->deadline) {
           request_head *head;
           char *data;
-          assert(req->reqbuf.peek(&head, &data));
+          CHECK(req->reqbuf.peek(&head, &data));
           FAIL("blocked request timed out after " << config.timeout << " s."
               << " dst rank " << head->dst << "."
               << " from route " << (req->recv_rt.remote ? "remote" : "local") << " " << req->recv_rt.idx);

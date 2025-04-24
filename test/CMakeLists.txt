@@ -1,5 +1,7 @@
 add_executable(ygm-trace ygm-trace.cpp)
 target_link_libraries(ygm-trace PRIVATE buddy absl::flat_hash_map)
+# Dont want to fix this now
+target_compile_options(ygm-trace PRIVATE -Wno-narrowing)
 
 add_executable(histo histo.cpp)
 target_link_libraries(histo PRIVATE buddy)
@@ -8,9 +10,11 @@ target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)
 add_executable(route_inl_serial route.cpp)
 target_link_libraries(route_inl_serial PRIVATE buddy)
 target_compile_definitions(route_inl_serial PRIVATE INLINE=1)
+target_compile_options(route_inl_serial PRIVATE -Wno-unknown-pragmas)
 
 add_executable(route_sep_serial route.cpp)
 target_link_libraries(route_sep_serial PRIVATE buddy)
+target_compile_options(route_sep_serial PRIVATE -Wno-unknown-pragmas)
 
 if (OpenMP_CXX_FOUND)
     add_executable(route_sep_atomic route.cpp)

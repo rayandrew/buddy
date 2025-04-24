@@ -34,7 +34,7 @@ uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, MPI_Com
   return table;
 }
 
-DpuConn::DpuConn(MPI_Comm world_comm, size_t h2d_size, size_t d2h_size)
+DpuConn::DpuConn(MPI_Comm world_comm, int32_t h2d_size, int32_t d2h_size)
 {
   int world_rank;
   CHECK_MPI(MPI_Comm_rank(world_comm, &world_rank));
