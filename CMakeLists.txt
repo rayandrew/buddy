@@ -15,7 +15,7 @@ set(CMAKE_CXX_FLAGS "-Wall ${CMAKE_CXX_FLAGS}")
 set(CMAKE_C_FLAGS "-Wall ${CMAKE_C_FLAGS}")
 
 find_package(MPI REQUIRED)
-find_package(absl REQUIRED)
+find_package(absl)
 find_package(OpenMP)
 
 include_directories(src valgrind)

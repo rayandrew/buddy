@@ -1,7 +1,9 @@
-add_executable(ygm-trace ygm-trace.cpp)
-target_link_libraries(ygm-trace PRIVATE buddy absl::flat_hash_map)
-# Dont want to fix this now
-target_compile_options(ygm-trace PRIVATE -Wno-narrowing)
+if (absl_FOUND)
+    add_executable(ygm-trace ygm-trace.cpp)
+    target_link_libraries(ygm-trace PRIVATE buddy absl::flat_hash_map)
+    # Dont want to fix this now
+    target_compile_options(ygm-trace PRIVATE -Wno-narrowing)
+endif()
 
 add_executable(histo histo.cpp)
 target_link_libraries(histo PRIVATE buddy)

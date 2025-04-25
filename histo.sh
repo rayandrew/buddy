@@ -19,6 +19,12 @@ dpu_build="$JDB_CWD"/dpu-rel
 
 env="env OMP_NUM_THREADS=$pcore OMP_PROC_BIND=$omp_bind"
 
+if which mpirun 2>&1 1>/dev/null; then
+    nrun="mpirun -np"
+else
+    nrun="srun -n"
+fi
+
 case "$ploc" in
     sock)
         $env numactl -N0 "$build"/src/buddy-proxy > proxy.log &
@@ -42,7 +48,7 @@ if [ "$freq" != 3500 ]; then
     sudo cpupower -c "$node1" frequency-set -u "$freq"MHz
 fi
 
-mpirun -np 16 numactl -N1 "$build"/test/histo "$bins" "$load" 1 > histo.log
+$nrun 16 numactl -N1 env BUDDY_DPU=$BUDDY_DPU "$build"/test/histo "$bins" "$load" 1 > histo.log
 
 wait
 

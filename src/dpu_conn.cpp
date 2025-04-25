@@ -28,8 +28,12 @@ uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, MPI_Com
   CHECK(dpu_ent->h_length == sizeof(dpu_ip));
   memcpy(&dpu_ip, *dpu_ent->h_addr_list, sizeof(dpu_ip));
 
+  // Gather from all ranks
   CHECK_MPI(MPI_Gather(&dpu_ip, sizeof(dpu_ip), MPI_BYTE, table, sizeof(dpu_ip), MPI_BYTE, 0, world_comm));
-  CHECK_MPI(MPI_Bcast(table, sizeof(dpu_ip)*world_size, MPI_BYTE, 0, leader_comm));
+
+  // Broadcast to leaders
+  if (table)
+    CHECK_MPI(MPI_Bcast(table, sizeof(dpu_ip)*world_size, MPI_BYTE, 0, leader_comm));
 
   return table;
 }
@@ -43,6 +47,8 @@ DpuConn::DpuConn(MPI_Comm world_comm, int32_t h2d_size, int32_t d2h_size)
   // HACK: this does not work if world_comm != MPI_COMM_WORLD
   int local_size = 0;
   int local_rank = 0;
+
+  /*
   char *env;
 
   env = getenv("OMPI_COMM_WORLD_LOCAL_SIZE");
@@ -53,6 +59,11 @@ DpuConn::DpuConn(MPI_Comm world_comm, int32_t h2d_size, int32_t d2h_size)
   env = getenv("OMPI_COMM_WORLD_LOCAL_RANK");
   CHECK(env);
   local_rank = atoi(env);
+  */
+  MPI_Comm local_comm;
+  CHECK_MPI(MPI_Comm_split_type(world_comm, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &local_comm));
+  CHECK_MPI(MPI_Comm_size(local_comm, &local_size));
+  CHECK_MPI(MPI_Comm_rank(local_comm, &local_rank));
 
   MPI_Comm leader_comm;
   CHECK_MPI(MPI_Comm_split(world_comm, local_rank == 0 ? 0 : MPI_UNDEFINED, 0, &leader_comm));

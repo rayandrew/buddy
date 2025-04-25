@@ -45,9 +45,11 @@ Proxy::~Proxy()
   CHECK(!ibv_dereg_mr(h2d_mr));
   delete[] h2d_buf;
 
-  char *d2d_buf = (char *)d2d_mr->addr;
-  CHECK(!ibv_dereg_mr(d2d_mr));
-  delete[] d2d_buf;
+  if (d2d_mr) {
+    char *d2d_buf = (char *)d2d_mr->addr;
+    CHECK(!ibv_dereg_mr(d2d_mr));
+    delete[] d2d_buf;
+  }
 }
 
 Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
@@ -93,9 +95,13 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 
   size_t total_size_d2d = config.d2d_size * d2d_depth;
   CHECK(!num_remotes || total_size_d2d);
-  char *d2d_buf = new char[total_size_d2d];
-  d2d_mr = ibv_reg_mr(rdma::Context::get().get_pd(), d2d_buf, total_size_d2d, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
-  CHECK(d2d_mr);
+  if (total_size_d2d) {
+    char *d2d_buf = new char[total_size_d2d];
+    d2d_mr = ibv_reg_mr(rdma::Context::get().get_pd(), d2d_buf, total_size_d2d, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    CHECK(d2d_mr);
+  } else {
+    d2d_mr = nullptr;
+  }
 
   std::cout << "ranks:";
   for (unsigned i = 0; i < num_clients; i++)
@@ -527,18 +533,24 @@ SendBufs::SendBufs(unsigned n, unsigned size)
   : n(n)
   , size(size)
 {
-  reqbufs = new ReqBufWrite[n];
-  char *buf = new char[n*size];
-  mr_ = ibv_reg_mr(rdma::Context::get().get_pd(), buf, n*size, IBV_ACCESS_LOCAL_WRITE);
-  CHECK(mr_);
+  if (n) {
+    reqbufs = new ReqBufWrite[n];
+    char *buf = new char[n*size];
+    mr_ = ibv_reg_mr(rdma::Context::get().get_pd(), buf, n*size, IBV_ACCESS_LOCAL_WRITE);
+    CHECK_ERRNO(mr_);
 
-  for (unsigned i = 0; i < n; i++)
-    new (&reqbufs[i]) ReqBufWrite(buf + offset(i), size);
+    for (unsigned i = 0; i < n; i++)
+      new (&reqbufs[i]) ReqBufWrite(buf + offset(i), size);
 
-  flushing = new std::atomic_bool[n];
-  //flushing = new bool[n];
-  for (unsigned i = 0; i < n; i++)
-    flushing[i] = false;
+    flushing = new std::atomic_bool[n];
+    //flushing = new bool[n];
+    for (unsigned i = 0; i < n; i++)
+      flushing[i] = false;
+  } else {
+    reqbufs = nullptr;
+    mr_ = nullptr;
+    flushing = nullptr;
+  }
 }
 
 SendBufs::~SendBufs()

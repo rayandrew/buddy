@@ -4,9 +4,9 @@ Offloading and batching of MPI non-blocking operations to BlueField SmartNIC. It
 
 ## Build
 
-    mkdir build
-    cd build
-    cmake ..
+    mkdir build-dbg
+    cd build-dbg
+    cmake .. -DCMAKE_BUILD_TYPE=Debug
     make
 
 ## Design
