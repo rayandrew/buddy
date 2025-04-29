@@ -77,7 +77,7 @@ struct send_buf_id {
 
 class SendBufs {
   public:
-    SendBufs() { memset(this, 0, sizeof(*this)); }
+    SendBufs() : n(0), size(0) {}
     SendBufs(unsigned n, unsigned size);
     ~SendBufs();
 
@@ -103,8 +103,9 @@ class SendBufs {
     }
 
   private:
-    unsigned n;
-    unsigned size;
+    const unsigned n;
+    const unsigned size;
+
     ibv_mr *mr_;
     ReqBufWrite *reqbufs;
     std::atomic_bool *flushing;
