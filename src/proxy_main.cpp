@@ -24,12 +24,14 @@ int main(int argc, char **argv)
   int conn_count = 0;
   int *conn_list = NULL;
   int *ranks = NULL;
-  uint32_t *address_table = NULL;
   int world_size = 0;
   int local_min = INT_MAX;
   int local_max = 0;
   int h2d_size = 0;
   int d2h_size = 0;
+
+  // DPU address for each rank, sent by local rank 0
+  uint32_t *address_table = NULL;
 
   std::cout << "listening for connections..." << std::endl;
 
@@ -76,6 +78,7 @@ int main(int argc, char **argv)
       CHECK(d2h_size == msg.d2h_size);
 
     if (msg.send_address_table) {
+      CHECK(!address_table);
       address_table = new uint32_t[msg.world_size];
       buddy::full_read(conn, (char *)address_table, world_size*sizeof(*address_table));
     }
@@ -102,38 +105,49 @@ int main(int argc, char **argv)
     routing_table[ranks[i]] = buddy::dpu::route::make_local(i);
   }
 
-  // Assumption: ranks on same node are adjacent
-  // Connect all DPU pairs
-  std::vector<buddy::rdma::QP> remote_qps;
+  int num_remotes = world_size / local_size - 1;
+  for (int rank = 0; rank < world_size; rank++) {
+    int dpu_id = rank / local_size;
 
-  for (int i = 0; i < world_size - local_size; i++) {
-    int rank = (i + local_max + 1) % world_size;
-    bool inverse = rank < local_min;
-
-    if (rank == 0 || address_table[rank-1] != address_table[rank]) {
-      int socket;
-      if (inverse) {
-        socket = buddy::tcp_connect_ip(address_table[rank], buddy::REMOTE_PORT);
-
-        buddy::full_write(socket, (char *)&local_min, sizeof(local_min));
-        buddy::full_write(socket, (char *)&rank, sizeof(rank));
-      } else {
-        socket = accept(remote_lsock, NULL, NULL);
-
-        int msg;
-        buddy::full_read(socket, (char *)&msg, sizeof(msg));
-        CHECK(msg == rank);
-        buddy::full_read(socket, (char *)&msg, sizeof(msg));
-        CHECK(msg == local_min);
-      }
-      CHECK(socket >= 0);
-
-      remote_qps.emplace_back(remote_cqs, socket, inverse);
-      close(socket);
+    if (rank >= local_min) {
+      if (rank <= local_max)
+        continue;
+      else
+        dpu_id--;
     }
 
-    assert(remote_qps.size() > 0);
-    routing_table[rank] = buddy::dpu::route::make_remote(remote_qps.size()-1);
+    assert(dpu_id < num_remotes);
+
+    routing_table[rank] = buddy::dpu::route::make_remote(dpu_id);
+  }
+
+  // Assumption: ranks on same node are adjacent
+  // Connect all DPU pairs
+  auto remote_qps = new buddy::rdma::QP[num_remotes];
+
+  int local_node = local_min / local_size;
+  for (int node = 0; node < local_node; node++) {
+    int socket = buddy::tcp_connect_ip(address_table[node*local_size], buddy::REMOTE_PORT);
+
+    buddy::full_write(socket, (char *)&local_node, sizeof(local_node));
+    buddy::full_write(socket, (char *)&node, sizeof(node));
+
+    new (&remote_qps[node]) buddy::rdma::QP(remote_cqs, socket, false);
+    close(socket);
+  }
+
+  for (int i = 0; i < num_remotes - local_node; i++) {
+    int socket = accept(remote_lsock, NULL, NULL);
+
+    int from_node, to_node;
+    buddy::full_read(socket, (char *)&from_node, sizeof(from_node));
+    buddy::full_read(socket, (char *)&to_node, sizeof(to_node));
+
+    CHECK(to_node == local_node);
+    CHECK(from_node > local_node);
+
+    new (&remote_qps[from_node-1]) buddy::rdma::QP(remote_cqs, socket, true);
+    close(socket);
   }
 
   close(remote_lsock);
@@ -166,8 +180,8 @@ int main(int argc, char **argv)
     .remote_recv = remote_cqs.recv,
   };
 
-  buddy::dpu::Proxy proxy(config, cqs, conn_count, remote_qps.size(), world_size,
-      local_qps, remote_qps.data(),
+  buddy::dpu::Proxy proxy(config, cqs, conn_count, num_remotes, world_size,
+      local_qps, remote_qps,
 #ifdef LOCAL_DMA
       &dma_engine,
 #endif
@@ -183,7 +197,7 @@ int main(int argc, char **argv)
   proxy.rdma_loop();
 
   delete[] local_qps;
-  remote_qps.clear();
+  delete[] remote_qps;
 
   CHECK(!ibv_destroy_cq(cqs.send));
   CHECK(!ibv_destroy_cq(cqs.local_recv));

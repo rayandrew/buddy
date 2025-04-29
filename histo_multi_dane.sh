@@ -8,6 +8,7 @@ set -Eexo pipefail
 : ${freq:=3500}
 : ${bins:=10000}
 : ${load:=10000000}
+: ${node_ranks:=16}
 
 : ${JDB_CWD:=$PWD}
 
@@ -21,13 +22,16 @@ dpu_build="$JDB_CWD"/dpu-dbg
 
 env="env OMP_NUM_THREADS=$pcore OMP_PROC_BIND=$omp_bind"
 
+netmask=$(hwloc-calc socket:1 --cof taskset)
+compmask=$(hwloc-calc socket:0 --cof taskset)
+
 case "$ploc" in
     sock)
-        srun -n 2 --ntasks-per-node=1 --label $env numactl -N0 "$build"/src/buddy-proxy > proxy.log &
+        srun --overlap --ntasks-per-node=1 --label --cpu-bind="mask_cpu:$netmask" $env "$build"/src/buddy-proxy > "proxy-$SLURM_JOB_ID.log" &
         mpi_sh=./hostname_dpu.sh
         ;;
     corun)
-        srun -n 2 --ntasks-per-node=1 --label $env numactl -N1 "$build"/src/buddy-proxy > proxy.log &
+        srun --overlap --ntasks-per-node=1 --label --cpu-bind="mask_cpu:$compmask" $env "$build"/src/buddy-proxy > "proxy-$SLURM_JOB_ID.log" &
         mpi_sh=./hostname_dpu.sh
         ;;
     *)
@@ -37,9 +41,12 @@ esac
 
 sleep 1
 
-srun -n 32 --ntasks-per-node=16 numactl -N1 $mpi_sh "$build"/test/histo "$bins" "$load" 1 > histo.log
+srun --overlap --ntasks-per-node="$node_ranks" --cpu-bind="mask_cpu:$compmask" $mpi_sh "$build"/test/histo "$bins" "$load" 1 > "histo-$SLURM_JOB_ID.log"
 
-wait
+wait -n
 
-expect="$(< "$JDB_CWD/test/histo-result/32_${bins}_${load}_1")"
+ranks="$(( $node_ranks * $SLURM_JOB_NUM_NODES ))"
+expect="$(< "$JDB_CWD/test/histo-result/${ranks}_${bins}_${load}_1")"
 grep -qF "$expect" histo.log
+
+echo "ok!"
