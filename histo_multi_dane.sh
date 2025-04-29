@@ -9,6 +9,7 @@ set -Eexo pipefail
 : ${bins:=10000}
 : ${load:=10000000}
 : ${node_ranks:=16}
+: ${ver:=dbg}
 
 : ${JDB_CWD:=$PWD}
 
@@ -17,8 +18,8 @@ set -Eexo pipefail
 # build="$JDB_CWD"/host-rel
 # dpu_build="$JDB_CWD"/dpu-rel
 
-build="$JDB_CWD"/host-dbg
-dpu_build="$JDB_CWD"/dpu-dbg
+build="$JDB_CWD/host-$ver"
+dpu_build="$JDB_CWD/dpu-$ver"
 
 env="env OMP_NUM_THREADS=$pcore OMP_PROC_BIND=$omp_bind"
 
