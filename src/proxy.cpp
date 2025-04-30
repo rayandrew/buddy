@@ -548,15 +548,19 @@ SendBufs::SendBufs(unsigned n, unsigned size)
   for (unsigned i = 0; i < n; i++)
     new (&reqbufs[i]) ReqBufWrite(buf + offset(i), size);
 
-  states = new std::atomic<state>[n];
+  is_ready = new bool[n];
   for (unsigned i = 0; i < n; i++)
-    states[i] = READY;
+    is_ready[i] = true;
+
+  is_complete = new std::atomic_bool[n];
 }
 
 SendBufs::~SendBufs()
 {
-  if (states)
-    delete[] states;
+  if (is_ready)
+    delete[] is_ready;
+  if (is_complete)
+    delete[] is_complete;
   if (reqbufs)
     delete[] reqbufs;
   if (mr_) {

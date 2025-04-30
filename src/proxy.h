@@ -80,7 +80,6 @@ class SendBufs {
   // READY -> FLUSHING by sender thread
   // FLUSHING -> COMPLETE by poller thread
   // COMPLETE -> READY by sender thread
-  enum state { READY, FLUSHING, COMPLETE };
 
   public:
     SendBufs() = default;
@@ -94,37 +93,37 @@ class SendBufs {
     // Called from sender thread
     bool ready_for_send(unsigned i)
     {
-      state s = states[i];
-
-      if (s == READY)
+      if (is_ready[i])
         return true;
 
-      if (s == COMPLETE) {
+      if (is_complete[i]) {
         reqbufs[i].reset_pos();
-        states[i] = READY;
+        is_ready[i] = true;
 
         return true;
       }
 
+      // Buffer is being flushed
       return false;
     }
 
     // Called from sender thread
     void mark_flushing(unsigned i)
     {
-      assert(states[i] == READY);
+      assert(is_ready[i]);
 
       flush_count++;
       total_bytes += reqbufs[i].get_pos();
 
-      states[i] = FLUSHING;
+      is_ready[i] = false;
+      is_complete[i] = false;
     }
 
     // Called from poller thread
     void mark_complete(unsigned i)
     {
-      assert(states[i] == FLUSHING);
-      states[i] = COMPLETE;
+      assert(!is_complete[i]);
+      is_complete[i] = true;
     }
 
     void get_counts(uint64_t *count, uint64_t *bytes)
@@ -139,7 +138,8 @@ class SendBufs {
 
     ibv_mr *mr_ = NULL;
     ReqBufWrite *reqbufs = NULL;
-    std::atomic<state> *states = NULL;
+    bool *is_ready = NULL;
+    std::atomic_bool *is_complete = NULL;
 
     uint64_t flush_count = 0;
     uint64_t total_bytes = 0;
