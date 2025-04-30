@@ -69,19 +69,20 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   , local_idx_to_rank(ranks)
   , routing_table(routing_table)
 {
+  int num_threads = omp_get_num_threads();
+
 #pragma omp parallel
+#pragma omp master
   {
-    int tid = omp_get_thread_num();
-    int num_threads = omp_get_num_threads();
+    num_threads = omp_get_num_threads();
+  }
 
-#pragma omp single
-    {
-      in_counters = new rdma_counters[num_threads];
+  in_counters = new rdma_counters[num_threads];
 
-      d2h_send = new SendBufs[num_threads];
-      d2d_send = new SendBufs[num_threads];
-    }
+  d2h_send = new SendBufs[num_threads];
+  d2d_send = new SendBufs[num_threads];
 
+  for (int tid = 0; tid < num_threads; tid++) {
     // TODO: allow different d2d buffer size
     new (&d2h_send[tid]) SendBufs(num_clients, config.d2h_size);
     new (&d2d_send[tid]) SendBufs(num_remotes, config.h2d_size);
