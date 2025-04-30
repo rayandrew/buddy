@@ -158,9 +158,7 @@ void Proxy::poll_send_queue()
     if (id.rt.remote)
       send_bufs = &d2d_send[id.tid];
 
-    assert(send_bufs->is_flushing(id.rt.idx));
-    send_bufs->reqs(id.rt.idx).reset_pos();
-    send_bufs->set_flushing(id.rt.idx, false);
+    send_bufs->mark_complete(id.rt.idx);
   }
 }
 
@@ -435,9 +433,9 @@ bool Proxy::route_reqs(ReqBufRead &reader)
     if (r.remote)
       send_bufs = &d2d_send[tid];
 
-    if (send_bufs->is_flushing(r.idx)) {
+    if (!send_bufs->ready_for_send(r.idx)) {
       poll_send_queue();
-      if (send_bufs->is_flushing(r.idx))
+      if (!send_bufs->ready_for_send(r.idx))
         return false;
     }
 
@@ -472,14 +470,12 @@ void Proxy::flush_remote(unsigned idx)
 {
   int tid = omp_get_thread_num();
 
-  assert(!d2d_send[tid].is_flushing(idx));
-
   if (d2d_send[tid].reqs(idx).empty())
     return;
 
   tic(TT_REMFLUSH);
 
-  d2d_send[tid].set_flushing(idx, true);
+  d2d_send[tid].mark_flushing(idx);
 
   size_t size = d2d_send[tid].reqs(idx).get_pos();
   route rt = route::make_remote(idx);
@@ -496,14 +492,12 @@ void Proxy::flush_local(unsigned idx)
 {
   int tid = omp_get_thread_num();
 
-  assert(!d2h_send[tid].is_flushing(idx));
-
   if (d2h_send[tid].reqs(idx).empty())
     return;
 
   tic(TT_LOCFLUSH);
 
-  d2h_send[tid].set_flushing(idx, true);
+  d2h_send[tid].mark_flushing(idx);
 
   size_t size = d2h_send[tid].reqs(idx).get_pos();
   route rt = route::make_local(idx);
@@ -521,11 +515,11 @@ void Proxy::flush_all()
   int tid = omp_get_thread_num();
 
   for (unsigned i = 0; i < num_clients; i++)
-    if (!d2h_send[tid].is_flushing(i))
+    if (d2h_send[tid].ready_for_send(i))
       flush_local(i);
 
   for (unsigned i = 0; i < num_remotes; i++)
-    if (!d2d_send[tid].is_flushing(i))
+    if (d2d_send[tid].ready_for_send(i))
       flush_remote(i);
 }
 
@@ -533,30 +527,26 @@ SendBufs::SendBufs(unsigned n, unsigned size)
   : n(n)
   , size(size)
 {
-  if (n) {
-    reqbufs = new ReqBufWrite[n];
-    char *buf = new char[n*size];
-    mr_ = ibv_reg_mr(rdma::Context::get().get_pd(), buf, n*size, IBV_ACCESS_LOCAL_WRITE);
-    CHECK_ERRNO(mr_);
+  if (!n)
+    return;
 
-    for (unsigned i = 0; i < n; i++)
-      new (&reqbufs[i]) ReqBufWrite(buf + offset(i), size);
+  reqbufs = new ReqBufWrite[n];
+  char *buf = new char[n*size];
+  mr_ = ibv_reg_mr(rdma::Context::get().get_pd(), buf, n*size, IBV_ACCESS_LOCAL_WRITE);
+  CHECK_ERRNO(mr_);
 
-    flushing = new std::atomic_bool[n];
-    //flushing = new bool[n];
-    for (unsigned i = 0; i < n; i++)
-      flushing[i] = false;
-  } else {
-    reqbufs = nullptr;
-    mr_ = nullptr;
-    flushing = nullptr;
-  }
+  for (unsigned i = 0; i < n; i++)
+    new (&reqbufs[i]) ReqBufWrite(buf + offset(i), size);
+
+  states = new std::atomic<state>[n];
+  for (unsigned i = 0; i < n; i++)
+    states[i] = READY;
 }
 
 SendBufs::~SendBufs()
 {
-  if (flushing)
-    delete[] flushing;
+  if (states)
+    delete[] states;
   if (reqbufs)
     delete[] reqbufs;
   if (mr_) {

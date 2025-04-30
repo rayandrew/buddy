@@ -76,26 +76,57 @@ struct send_buf_id {
 };
 
 class SendBufs {
+  // Valid transitions:
+  // READY -> FLUSHING by sender thread
+  // FLUSHING -> COMPLETE by poller thread
+  // COMPLETE -> READY by sender thread
+  enum state { READY, FLUSHING, COMPLETE };
+
   public:
-    SendBufs() : n(0), size(0) {}
+    SendBufs() = default;
     SendBufs(unsigned n, unsigned size);
     ~SendBufs();
 
     ReqBufWrite &reqs(unsigned i) { return reqbufs[i]; }
     size_t offset(unsigned i) { return i*size; }
     ibv_mr *mr() { return mr_; }
-    bool is_flushing(unsigned i) { return flushing[i]; }
-    void set_flushing(unsigned i, bool x)
-    {
-      assert(flushing[i] != x);
 
-      if (x) {
-        flush_count++;
-        total_bytes += reqbufs[i].get_pos();
+    // Called from sender thread
+    bool ready_for_send(unsigned i)
+    {
+      state s = states[i];
+
+      if (s == READY)
+        return true;
+
+      if (s == COMPLETE) {
+        reqbufs[i].reset_pos();
+        states[i] = READY;
+
+        return true;
       }
 
-      flushing[i] = x;
+      return false;
     }
+
+    // Called from sender thread
+    void mark_flushing(unsigned i)
+    {
+      assert(states[i] == READY);
+
+      flush_count++;
+      total_bytes += reqbufs[i].get_pos();
+
+      states[i] = FLUSHING;
+    }
+
+    // Called from poller thread
+    void mark_complete(unsigned i)
+    {
+      assert(states[i] == FLUSHING);
+      states[i] = COMPLETE;
+    }
+
     void get_counts(uint64_t *count, uint64_t *bytes)
     {
       *count = flush_count;
@@ -103,16 +134,15 @@ class SendBufs {
     }
 
   private:
-    const unsigned n;
-    const unsigned size;
+    const unsigned n = 0;
+    const unsigned size = 0;
 
-    ibv_mr *mr_;
-    ReqBufWrite *reqbufs;
-    std::atomic_bool *flushing;
-    //bool *flushing;
+    ibv_mr *mr_ = NULL;
+    ReqBufWrite *reqbufs = NULL;
+    std::atomic<state> *states = NULL;
 
-    uint64_t flush_count;
-    uint64_t total_bytes;
+    uint64_t flush_count = 0;
+    uint64_t total_bytes = 0;
 };
 
 struct proxy_cqs {
