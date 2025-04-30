@@ -14,7 +14,7 @@ struct ProxyConfig {
   unsigned h2d_size = 0;
   unsigned d2h_size = 0;
   unsigned d2d_size = 64*1024*1024;
-  double timeout = 5.0;
+  double timeout = 10.0;
 };
 
 struct route {
@@ -195,6 +195,7 @@ class Proxy {
 
     SendBufs *d2h_send;
     SendBufs *d2d_send;
+    double *last_thread_progress;
 
     route *routing_table;
 

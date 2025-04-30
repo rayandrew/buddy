@@ -81,6 +81,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 
   d2h_send = new SendBufs[num_threads];
   d2d_send = new SendBufs[num_threads];
+  last_thread_progress = new double[num_threads];
 
   for (int tid = 0; tid < num_threads; tid++) {
     // TODO: allow different d2d buffer size
@@ -254,7 +255,9 @@ void Proxy::rdma_loop()
 
 #pragma omp parallel reduction(max:max_blocked)
   {
-    //bool pending_flush = false;
+    int tid = omp_get_thread_num();
+    last_thread_progress[tid] = omp_get_wtime();
+
     std::list<blocked_req> blocklist;
 
 #pragma omp barrier
@@ -270,17 +273,14 @@ void Proxy::rdma_loop()
     // preceeded by an application barrier.
     while (quit_counter != num_clients) {
       bool recv = poll_recv_queue(blocklist);
-      /*
-      if (recv)
-        pending_flush = true;
 
-      if (!recv && pending_flush) {
+      if (!recv) {
         flush_all();
-        pending_flush = false;
+
+        // Thread is idle, no work to do
+        if (blocklist.empty())
+          last_thread_progress[tid] = omp_get_wtime();
       }
-      */
-      if (!recv)
-        flush_all();
 
       // std::list::size is constant since C++11
       max_blocked = std::max(blocklist.size(), max_blocked);
@@ -290,15 +290,14 @@ void Proxy::rdma_loop()
         if (route_reqs(req->reqbuf)) {
           post_recv(req->recv_rt);
           req = blocklist.erase(req);
-        } else if (omp_get_wtime() > req->deadline) {
-          request_head *head;
-          char *data;
-          CHECK(req->reqbuf.peek(&head, &data));
-          FAIL("blocked request timed out after " << config.timeout << " s."
-              << " dst rank " << head->dst << "."
-              << " from route " << (req->recv_rt.remote ? "remote" : "local") << " " << req->recv_rt.idx);
         } else
           ++req;
+      }
+
+      double now = omp_get_wtime();
+      if (now > last_thread_progress[tid] + config.timeout) {
+        FAIL("Thread " << tid << " timed out, no progress for " << config.timeout << " s."
+            << " Length of blocklist is " << blocklist.size() << ".");
       }
 
       poll_send_queue();
@@ -424,6 +423,9 @@ bool Proxy::route_reqs(ReqBufRead &reader)
 
   int tid = omp_get_thread_num();
 
+  bool complete = true;
+  bool progress = false;
+
   request_head *head;
   char *data;
   while (reader.peek(&head, &data)) {
@@ -436,14 +438,17 @@ bool Proxy::route_reqs(ReqBufRead &reader)
 
     if (!send_bufs->ready_for_send(r.idx)) {
       poll_send_queue();
-      if (!send_bufs->ready_for_send(r.idx))
-        return false;
+      if (!send_bufs->ready_for_send(r.idx)) {
+        complete = false;
+        break;
+      }
     }
 
     ReqBufWrite& req = send_bufs->reqs(r.idx);
     if (!req.append(*head, data)) {
       flush(r);
-      return false;
+      complete = false;
+      break;
     }
 
     if (r.remote)
@@ -452,11 +457,15 @@ bool Proxy::route_reqs(ReqBufRead &reader)
       TRACE(2, "route to " << head->dst << " (local " << r.idx << ")");
 
     reader.advance(head);
+    progress = true;
   }
+
+  if (progress)
+    last_thread_progress[tid] = omp_get_wtime();
 
   toc(TT_ROUTE);
 
-  return true;
+  return complete;
 }
 
 void Proxy::flush(route r)
