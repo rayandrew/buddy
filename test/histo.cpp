@@ -179,6 +179,9 @@ poll:
       MPI_Request count_req = MPI_REQUEST_NULL;
       uint64_t local_counts[2] = {};
       uint64_t global_counts[2] = {};
+      uint64_t prev_counts[2] = {};
+
+      double finishing_time = 0.0;
 
       while (send_block || n == load) {
         int num_buf = num_sendbuf + num_recvbuf;
@@ -213,6 +216,16 @@ poll:
         if (n == load) {
           tic(TT_BARRIER);
 
+          const double TIMEOUT = 30.0;
+          double now = MPI_Wtime();
+          if (finishing_time == 0.0) {
+            finishing_time = now;
+          } else if (now - finishing_time > TIMEOUT) {
+            FAIL("Stuck in finishing loop for " << TIMEOUT << " s."
+                << " Local send/recv: " << send_count << "/" << recv_count << "."
+                << " Global send/recv: " << prev_counts[0] << "/" << prev_counts[1]);
+          }
+
           if (count_req == MPI_REQUEST_NULL) {
             local_counts[0] = send_count;
             local_counts[1] = recv_count;
@@ -224,8 +237,12 @@ poll:
 
           int flag;
           CHECK_MPI(MPI_Test(&count_req, &flag, MPI_STATUS_IGNORE));
-          if (flag && global_counts[0] == global_counts[1]) {
-            goto end;
+          if (flag) {
+            if (global_counts[0] == global_counts[1])
+              goto end;
+
+            prev_counts[0] = global_counts[0];
+            prev_counts[1] = global_counts[1];
           }
 
           toc(TT_BARRIER);
