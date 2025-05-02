@@ -216,7 +216,7 @@ poll:
         if (n == load) {
           tic(TT_BARRIER);
 
-          const double TIMEOUT = 30.0;
+          const double TIMEOUT = 60.0;
           double now = MPI_Wtime();
           if (finishing_time == 0.0) {
             finishing_time = now;
