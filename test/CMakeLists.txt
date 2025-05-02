@@ -9,6 +9,9 @@ add_executable(histo histo.cpp)
 target_link_libraries(histo PRIVATE buddy)
 target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)
 
+add_executable(buddy-lat buddy-lat.cpp)
+target_link_libraries(buddy-lat PRIVATE buddy)
+
 add_executable(route_inl_serial route.cpp)
 target_link_libraries(route_inl_serial PRIVATE buddy)
 target_compile_definitions(route_inl_serial PRIVATE INLINE=1)

@@ -1,0 +1,91 @@
+#include <mpi.h>
+#include <buddy.h>
+#include <request.h>
+#include "util_mpi.h"
+
+const size_t MAXLEN = 1*1024*1024;
+
+enum {
+  ID_SEND,
+  ID_RECV,
+};
+
+void wait_for(uint64_t id, size_t size)
+{
+  for (;;) {
+    uint64_t ids[2];
+    uint64_t sizes[2];
+    int n = buddy_poll(ids, sizes, 2);
+    for (int j = 0; j < n; j++) {
+      if (ids[j] == id) {
+        CHECK(id != ID_RECV || sizes[j] == size);
+        return;
+      }
+    }
+  }
+}
+
+int main(int argc, char **argv)
+{
+  CHECK_MPI(MPI_Init(&argc, &argv));
+
+  int rank, size;
+  CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &size));
+
+  CHECK(size == 2);
+
+  buddy_init(MPI_COMM_WORLD, MAXLEN, MAXLEN);
+
+  buddy_buf *send_buf = buddy_alloc(MAXLEN);
+  buddy_buf *recv_buf = buddy_alloc(MAXLEN);
+
+  buddy::request_head head = {.size = 0, .dst = !rank};
+  memcpy(send_buf->addr, &head, sizeof(head));
+
+  const int niter = 10000;
+  double time[niter];
+
+  for (int i = 0; i < niter; i++) {
+    buddy_recv(recv_buf, MAXLEN, 0, ID_RECV);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 0) {
+      double t0 = MPI_Wtime();
+      buddy_send(send_buf, sizeof(head), 0, ID_SEND);
+      wait_for(ID_RECV, sizeof(head));
+      double t1 = MPI_Wtime();
+      time[i] = (t1-t0)/2;
+    } else {
+      wait_for(ID_RECV, sizeof(head));
+      buddy_send(send_buf, sizeof(head), 0, ID_SEND);
+      wait_for(ID_SEND, 0);
+    }
+  }
+
+  if (rank == 0) {
+    double min = time[0];
+    double max = time[0];
+    double mean = time[0];
+
+    for (int i = 1; i < niter; i++) {
+      double t = time[i];
+      if (t < min)
+        min = t;
+      if (t > max)
+        max = t;
+      mean += t;
+    }
+    mean /= niter;
+
+    std::sort(std::begin(time), std::end(time));
+    double median = time[niter/2];
+
+    std::cout << min << '\t' << max << '\t' << median << '\t' << mean << std::endl;
+  }
+
+  buddy_free(recv_buf);
+  buddy_free(send_buf);
+
+  buddy_finalize();
+  MPI_Finalize();
+}
