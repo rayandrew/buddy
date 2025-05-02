@@ -25,7 +25,7 @@ void buddy_recv(buddy_buf *buf, size_t len, size_t offset, uint64_t id);
 
 // Places the user-specified id of at most max completed operations
 // in the ids array. Returns the number of completed operations.
-// After receiving the id from poll, the buffer is same to reuse.
+// After receiving the id from poll, the buffer is safe to reuse.
 int buddy_poll(uint64_t *ids, size_t *sizes, int max);
 
 #ifdef __cplusplus
