@@ -5,18 +5,12 @@ set -Eexo pipefail
 : ${ploc?}
 : ${pcore?}
 : ${omp_bind?}
-: ${freq:=3500}
 : ${bins:=10000}
 : ${load:=10000000}
 : ${node_ranks:=16}
 : ${ver:=dbg}
 
 : ${JDB_CWD:=$PWD}
-
-[ "$freq" = 3500 ]
-
-# build="$JDB_CWD"/host-rel
-# dpu_build="$JDB_CWD"/dpu-rel
 
 build="$JDB_CWD/host-$ver"
 dpu_build="$JDB_CWD/dpu-$ver"
