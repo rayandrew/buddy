@@ -22,21 +22,23 @@ compmask=$(hwloc-calc socket:0 --cof taskset)
 
 case "$ploc" in
     sock)
-        srun --overlap --ntasks-per-node=1 --label --cpu-bind="mask_cpu:$netmask" $env "$build"/src/buddy-proxy > "proxy-$SLURM_JOB_ID.log" &
-        mpi_sh=./hostname_dpu.sh
+        dpumask="$netmask"
         ;;
     corun)
-        srun --overlap --ntasks-per-node=1 --label --cpu-bind="mask_cpu:$compmask" $env "$build"/src/buddy-proxy > "proxy-$SLURM_JOB_ID.log" &
-        mpi_sh=./hostname_dpu.sh
+        dpumask="$compmask"
         ;;
     *)
         exit 1
         ;;
 esac
 
+# start proxy
+srun --overlap --ntasks-per-node=1 --label --cpu-bind="mask_cpu:$dpumask" $env "$build"/src/buddy-proxy > "proxy-$SLURM_JOB_ID.log" &
+
 sleep 1
 
-srun --overlap --ntasks-per-node="$node_ranks" --cpu-bind="mask_cpu:$compmask" $mpi_sh "$build"/test/histo "$bins" "$load" 1 > "histo-$SLURM_JOB_ID.log"
+# start app
+srun --overlap --ntasks-per-node="$node_ranks" --cpu-bind="mask_cpu:$compmask" ./hostname_dpu.sh "$build"/test/histo "$bins" "$load" 1 > "histo-$SLURM_JOB_ID.log"
 
 wait -n
 
