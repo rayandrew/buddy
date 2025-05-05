@@ -40,8 +40,9 @@ int main(int argc, char **argv)
   buddy_buf *send_buf = buddy_alloc(MAXLEN);
   buddy_buf *recv_buf = buddy_alloc(MAXLEN);
 
-  buddy::request_head head = {.size = 0, .dst = !rank};
+  buddy::request_head head = {.size = 1, .dst = !rank};
   memcpy(send_buf->addr, &head, sizeof(head));
+  ((char *)send_buf->addr)[sizeof(head)] = 0xff;
 
   const int niter = 10000;
   double time[niter];
@@ -51,13 +52,13 @@ int main(int argc, char **argv)
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) {
       double t0 = MPI_Wtime();
-      buddy_send(send_buf, sizeof(head), 0, ID_SEND);
-      wait_for(ID_RECV, sizeof(head));
+      buddy_send(send_buf, sizeof(head)+1, 0, ID_SEND);
+      wait_for(ID_RECV, sizeof(head)+1);
       double t1 = MPI_Wtime();
       time[i] = (t1-t0)/2;
     } else {
-      wait_for(ID_RECV, sizeof(head));
-      buddy_send(send_buf, sizeof(head), 0, ID_SEND);
+      wait_for(ID_RECV, sizeof(head)+1);
+      buddy_send(send_buf, sizeof(head)+1, 0, ID_SEND);
       wait_for(ID_SEND, 0);
     }
   }
@@ -79,8 +80,9 @@ int main(int argc, char **argv)
 
     std::sort(std::begin(time), std::end(time));
     double median = time[niter/2];
+    double p99 = time[(unsigned)(niter*0.99)];
 
-    std::cout << min << '\t' << max << '\t' << median << '\t' << mean << std::endl;
+    std::cout << min << '\t' << max << '\t' << median << '\t' << mean << '\t' << p99 << std::endl;
   }
 
   buddy_free(recv_buf);
