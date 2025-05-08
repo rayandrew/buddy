@@ -75,6 +75,18 @@ struct send_buf_id {
   }
 };
 
+class SizeHistogram {
+  public:
+    SizeHistogram() = default;
+    void record(size_t size);
+    void add(const SizeHistogram& other);
+    void print();
+
+  private:
+    static const unsigned levels = 10;
+    uint64_t counts[levels] = {};
+};
+
 class SendBufs {
   // Valid transitions:
   // READY -> FLUSHING by sender thread
@@ -89,6 +101,8 @@ class SendBufs {
     ReqBufWrite &reqs(unsigned i) { return reqbufs[i]; }
     size_t offset(unsigned i) { return i*size; }
     ibv_mr *mr() { return mr_; }
+
+    const SizeHistogram& get_hist() const { return size_hist; }
 
     // Called from sender thread
     bool ready_for_send(unsigned i)
@@ -113,7 +127,9 @@ class SendBufs {
       assert(is_ready[i]);
 
       flush_count++;
-      total_bytes += reqbufs[i].get_pos();
+      size_t size = reqbufs[i].get_pos();
+      total_bytes += size;
+      size_hist.record(size);
 
       is_ready[i] = false;
       is_complete[i] = false;
@@ -143,6 +159,7 @@ class SendBufs {
 
     uint64_t flush_count = 0;
     uint64_t total_bytes = 0;
+    SizeHistogram size_hist;
 };
 
 struct proxy_cqs {

@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <omp.h>
 #include "proxy.h"
 #include "util.h"
@@ -310,6 +311,37 @@ void Proxy::rdma_loop()
   print_counters(num_threads);
 }
 
+void SizeHistogram::record(size_t size)
+{
+  size_t level = 0;
+
+  if (size > 0) {
+    double dlevel = log10(size);
+    if (dlevel <= 0.0) {
+      level = 0;
+    } else {
+      level = (size_t)dlevel;
+      if (level >= levels)
+        level = levels-1;
+    }
+  }
+
+  counts[level] += 1;
+}
+
+void SizeHistogram::add(const SizeHistogram& other)
+{
+  for (unsigned level = 0; level < levels; level++)
+    counts[level] += other.counts[level];
+}
+
+void SizeHistogram::print()
+{
+  for (unsigned level = 0; level < levels; level++)
+    std::cout << counts[level] << '\t';
+  std::cout << std::endl;
+}
+
 void Proxy::print_counters(int num_threads)
 {
   rdma_counters in_total, out_total;
@@ -353,6 +385,18 @@ void Proxy::print_counters(int num_threads)
   if (out_total.count_remote)
     std::cout << "avg_out_remote\t" << out_total.bytes_remote/out_total.count_remote << std::endl;
   std::cout << "--------------------" << std::endl;
+
+  SizeHistogram d2h_hist, d2d_hist;
+  for (int tid = 0; tid < num_threads; tid++) {
+    d2h_hist.add(d2h_send[tid].get_hist());
+    d2d_hist.add(d2d_send[tid].get_hist());
+  }
+
+  std::cout << "--- local size histogram ---" << std::endl;
+  d2h_hist.print();
+
+  std::cout << "--- remote size histogram ---" << std::endl;
+  d2d_hist.print();
 
   tt_print("proxy breakdown");
 }
