@@ -17,6 +17,10 @@ dpu_build="$JDB_CWD/dpu-$ver"
 
 env="env OMP_NUM_THREADS=$pcore OMP_PROC_BIND=$omp_bind"
 
+if [ "$perf" ]; then
+    env="$env ./multiperf.sh perf-proxy"
+fi
+
 netmask=$(hwloc-calc socket:1 --cof taskset)
 compmask=$(hwloc-calc socket:0 --cof taskset)
 
