@@ -268,6 +268,8 @@ void Proxy::rdma_loop()
       std::cout << num_threads << " rdma threads ready" << std::endl;
     }
 
+    double last_recv = omp_get_wtime();
+
     tic(TT_RDMALOOP);
 
     // Logic to drain cq after quit should not be necessary if quit is
@@ -275,12 +277,18 @@ void Proxy::rdma_loop()
     while (quit_counter != num_clients) {
       bool recv = poll_recv_queue(blocklist);
 
-      if (!recv) {
-        flush_all();
+      if (recv) {
+        last_recv = omp_get_wtime();
+      } else {
+        double now = omp_get_wtime();
+        if (now > last_recv + config.quiet_time) {
+          last_recv = now;
+          flush_all();
+        }
 
         // Thread is idle, no work to do
         if (blocklist.empty())
-          last_thread_progress[tid] = omp_get_wtime();
+          last_thread_progress[tid] = now;
       }
 
       // std::list::size is constant since C++11

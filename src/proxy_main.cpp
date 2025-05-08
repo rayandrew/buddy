@@ -162,12 +162,16 @@ int main(int argc, char **argv)
   buddy::dpu::ProxyConfig config;
   char *env;
   env = getenv("BUDDY_TRACE");
-  if (env)
+  if (env && *env)
     config.trace = atoi(env);
 
   env = getenv("BUDDY_TIMEOUT");
-  if (env)
+  if (env && *env)
     config.timeout = strtod(env, NULL);
+
+  env = getenv("BUDDY_QUIET_TIME");
+  if (env && *env)
+    config.quiet_time = strtod(env, NULL);
 
   config.h2d_size = h2d_size;
   config.d2h_size = d2h_size;
