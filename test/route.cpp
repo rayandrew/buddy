@@ -10,23 +10,25 @@
 
 int main(int argc, char **argv)
 {
-  size_t insize = 100*1024*1024;
+  size_t incount = 10000000;
+
   if (argc > 1)
-    insize = std::strtoul(argv[1], NULL, 0);
+    incount = std::strtoul(argv[1], NULL, 0);
 
   uint32_t datasize = 8;
   if (argc > 2)
     datasize = std::strtoul(argv[2], NULL, 0);
 
 #ifdef FIXED
-    size_t header_size = sizeof(int32_t);
+  size_t header_size = sizeof(int32_t);
 #else
-    size_t header_size = sizeof(buddy::request_head);
+  size_t header_size = sizeof(buddy::request_head);
 #endif
-  insize -= insize % (header_size + datasize);
-  CHECK(insize % (header_size + datasize) == 0);
+  size_t insize = incount * (header_size + datasize);
 
   unsigned num_out = 32;
+
+  FILE *proc = NULL;
 
 #pragma omp parallel
   {
@@ -35,6 +37,7 @@ int main(int argc, char **argv)
 
     std::default_random_engine rand_engine(omp_get_thread_num());
     std::uniform_int_distribution<int32_t> dst_dist(0, num_out-1);
+    std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
     size_t count_per_out[num_out] = {0};
 
 #ifdef FIXED
@@ -45,22 +48,36 @@ int main(int argc, char **argv)
 #endif
     size_t incount = insize / (header_size + datasize);
 
+    uint8_t *data = (uint8_t*)malloc(datasize);
+
     for (size_t i = 0; i < incount; i++) {
       int32_t dst = dst_dist(rand_engine);
       count_per_out[dst]++;
 
+      for (uint32_t j = 0; j < datasize; j++)
+        data[j] = byte_dist(rand_engine);
+
+      /*
+      for (uint32_t j = 0; j < datasize; j++)
+        printf("%.2X ", data[j]);
+      printf("\n");
+      */
+
 #ifdef FIXED
       *((int32_t *)bufptr) = dst;
       bufptr += sizeof(int32_t);
+      memcpy(bufptr, data, datasize);
       bufptr += datasize;
 #else
       buddy::request_head head = {
         .size = datasize,
         .dst = dst,
       };
-      inwriter.append_head(head);
+      inwriter.append(head, (char *)data);
 #endif
     }
+
+    free(data);
 
     size_t max_out = count_per_out[0];
     for (unsigned i = 1; i < num_out; i++)
@@ -102,9 +119,9 @@ int main(int argc, char **argv)
 #else
     buddy::ReqBufRead inreader(inbuf, insize);
     buddy::request_head *head;
-    char *data;
-    while (inreader.peek(&head, &data)) {
-      [[maybe_unused]] bool ok = outwriters[head->dst].append(*head, data);
+    char *datap;
+    while (inreader.peek(&head, &datap)) {
+      [[maybe_unused]] bool ok = outwriters[head->dst].append(*head, datap);
       assert(ok);
       inreader.advance(head);
     }
@@ -120,15 +137,67 @@ int main(int argc, char **argv)
       double t = std::chrono::duration_cast<std::chrono::duration<double>>(t1-t0).count();
       double bw = num_threads * insize / t;
       double goodput = num_threads * (insize - incount * header_size) / t;
+      double rate = num_threads * incount / t;
       
-      std::cout << insize << std::endl;
-      std::cout << incount << std::endl;
-      std::cout << header_size << std::endl;
-      std::cout << std::endl;
-
       std::cout << "time: " << t << " s" << std::endl;
       std::cout << "bw: " << bw/1e9 << " GB/s" << std::endl;
       std::cout << "goodput: " << goodput/1e9 << " GB/s" << std::endl;
+      std::cout << "rate: " << rate/1e6 << " Mmsgs/s" << std::endl;
+      std::cout << std::endl;
     }
+
+    /* checksum for validation */
+#pragma omp master
+    {
+      proc = popen("sha1sum", "w");
+      CHECK(proc);
+    }
+
+    for (int thread = 0; thread < omp_get_num_threads(); thread++) {
+#pragma omp barrier
+      if (thread == omp_get_thread_num()) {
+        for (unsigned i = 0; i < num_out; i++) {
+          size_t n;
+#ifdef FIXED
+          n = out_idx[i];
+#else
+          n = outwriters[i].get_pos();
+#endif
+          size_t m = n / (header_size + datasize);
+          CHECK(fwrite(&m, sizeof(m), 1, proc));
+
+          buddy::request_head *head;
+          char *data;
+#ifdef FIXED
+          buddy::request_head stack_head;
+          head = &stack_head;
+          for (size_t idx = 0; idx < out_idx[i];) {
+            head->size = datasize;
+            head->dst = *((int32_t *)(outbufs[i]+idx));
+            idx += sizeof(int32_t);
+            data = outbufs[i] + idx;
+            idx += datasize;
+#else
+          buddy::ReqBufRead reader(outbufs[i], n);
+          while (reader.next(&head, &data)) {
+#endif
+
+            /*
+            for (uint32_t j = 0; j < datasize; j++)
+              printf("%.2X ", (uint8_t)data[j]);
+            printf("\n");
+            */
+
+            CHECK(fwrite(&head->size, sizeof(head->size), 1, proc));
+            CHECK(fwrite(&head->dst, sizeof(head->dst), 1, proc));
+            CHECK(fwrite(data, datasize, 1, proc));
+          }
+        }
+      }
+    }
+
+#pragma omp barrier
+#pragma omp master
+    CHECK(pclose(proc) == 0);
   }
 }
