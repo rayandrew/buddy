@@ -19,12 +19,21 @@ int main(int argc, char **argv)
   if (argc > 2)
     datasize = std::strtoul(argv[2], NULL, 0);
 
+  const size_t in_header_size =
 #ifdef FIXED
-  size_t header_size = sizeof(int32_t);
+    sizeof(int32_t);
 #else
-  size_t header_size = sizeof(buddy::request_head);
+    sizeof(buddy::request_head);
 #endif
-  size_t insize = incount * (header_size + datasize);
+
+  const size_t out_header_size =
+#ifdef TERM
+    0;
+#else
+    in_header_size;
+#endif
+
+  size_t insize = incount * (in_header_size + datasize);
 
   unsigned num_out = 32;
 
@@ -41,12 +50,11 @@ int main(int argc, char **argv)
     size_t count_per_out[num_out] = {0};
 
 #ifdef FIXED
-    size_t header_size = sizeof(int32_t);
     char *bufptr = inbuf;
 #else
     buddy::ReqBufWrite inwriter(inbuf, insize);
 #endif
-    size_t incount = insize / (header_size + datasize);
+    size_t incount = insize / (in_header_size + datasize);
 
     uint8_t *data = (uint8_t*)malloc(datasize);
 
@@ -91,7 +99,7 @@ int main(int argc, char **argv)
 #endif
 
     char *outbufs[num_out];
-    size_t out_len = max_out * (header_size + datasize);
+    size_t out_len = max_out * (out_header_size + datasize);
     for (unsigned i = 0; i < num_out; i++) {
       outbufs[i] = (char *)malloc(out_len);
       memset(outbufs[i], 0, out_len);
@@ -107,10 +115,12 @@ int main(int argc, char **argv)
     size_t in_idx = 0;
     while (in_idx < insize) {
       int32_t dst = *((int32_t *)(inbuf+in_idx));
+      in_idx += sizeof(int32_t);
 
+#ifndef TERM
       *((int32_t *)(outbufs[dst] + out_idx[dst])) = dst;
-      in_idx += header_size;
-      out_idx[dst] += header_size;
+      out_idx[dst] += out_header_size;
+#endif
 
       memcpy(outbufs[dst] + out_idx[dst], inbuf + in_idx, datasize);
       in_idx += datasize;
@@ -136,7 +146,7 @@ int main(int argc, char **argv)
 
       double t = std::chrono::duration_cast<std::chrono::duration<double>>(t1-t0).count();
       double bw = num_threads * insize / t;
-      double goodput = num_threads * (insize - incount * header_size) / t;
+      double goodput = num_threads * (insize - incount * in_header_size) / t;
       double rate = num_threads * incount / t;
       
       std::cout << "time: " << t << " s" << std::endl;
@@ -163,7 +173,8 @@ int main(int argc, char **argv)
 #else
           n = outwriters[i].get_pos();
 #endif
-          size_t m = n / (header_size + datasize);
+          size_t m = n / (out_header_size + datasize);
+          // printf("%zu = %zu\n", n, m);
           CHECK(fwrite(&m, sizeof(m), 1, proc));
 
           buddy::request_head *head;
@@ -173,8 +184,14 @@ int main(int argc, char **argv)
           head = &stack_head;
           for (size_t idx = 0; idx < out_idx[i];) {
             head->size = datasize;
+
+#ifdef TERM
+            head->dst = i;
+#else
             head->dst = *((int32_t *)(outbufs[i]+idx));
             idx += sizeof(int32_t);
+#endif
+
             data = outbufs[i] + idx;
             idx += datasize;
 #else
@@ -199,5 +216,10 @@ int main(int argc, char **argv)
 #pragma omp barrier
 #pragma omp master
     CHECK(pclose(proc) == 0);
+
+    for (unsigned i = 0; i < num_out; i++)
+      free(outbufs[i]);
+
+    free(inbuf);
   }
 }
