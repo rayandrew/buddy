@@ -8,42 +8,26 @@
 #include "request.h"
 #include "util.h"
 
-int main(int argc, char **argv)
-{
-  size_t incount = 10000000;
+#ifdef SIMD
+#include <immintrin.h>
+#endif
 
-  if (argc > 1)
-    incount = std::strtoul(argv[1], NULL, 0);
-
-  uint32_t datasize = 8;
-  if (argc > 2)
-    datasize = std::strtoul(argv[2], NULL, 0);
-
-  const size_t in_header_size =
+const size_t in_header_size =
 #ifdef FIXED
-    sizeof(int32_t);
+  sizeof(int32_t);
 #else
-    sizeof(buddy::request_head);
+  sizeof(buddy::request_head);
 #endif
 
-  const size_t out_header_size =
+const size_t out_header_size =
 #ifdef TERM
-    0;
+  0;
 #else
-    in_header_size;
+  in_header_size;
 #endif
 
-  size_t insize = incount * (in_header_size + datasize);
-
-  unsigned num_out = 32;
-
-  FILE *proc = NULL;
-
-#pragma omp parallel
-  {
-    char *inbuf = (char *)malloc(insize);
-    memset(inbuf, 123, insize);
-
+size_t init_buf(char *inbuf, size_t incount, uint32_t datasize, unsigned num_out)
+{
     std::default_random_engine rand_engine(omp_get_thread_num());
     std::uniform_int_distribution<int32_t> dst_dist(0, num_out-1);
     std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
@@ -52,9 +36,9 @@ int main(int argc, char **argv)
 #ifdef FIXED
     char *bufptr = inbuf;
 #else
+    size_t insize = incount * (in_header_size + datasize);
     buddy::ReqBufWrite inwriter(inbuf, insize);
 #endif
-    size_t incount = insize / (in_header_size + datasize);
 
     uint8_t *data = (uint8_t*)malloc(datasize);
 
@@ -91,6 +75,30 @@ int main(int argc, char **argv)
     for (unsigned i = 1; i < num_out; i++)
       if (count_per_out[i] > max_out)
         max_out = count_per_out[i];
+
+    return max_out;
+}
+
+int main(int argc, char **argv)
+{
+  size_t incount = 10000000;
+
+  if (argc > 1)
+    incount = std::strtoul(argv[1], NULL, 0);
+
+  uint32_t datasize = 8;
+  if (argc > 2)
+    datasize = std::strtoul(argv[2], NULL, 0);
+
+  size_t insize = incount * (in_header_size + datasize);
+  unsigned num_out = 32;
+
+  FILE *proc = NULL;
+
+#pragma omp parallel
+  {
+    char *inbuf = (char *)malloc(insize);
+    size_t max_out = init_buf(inbuf, incount, datasize, num_out);
 
 #ifdef FIXED
     size_t out_idx[num_out] = {0};

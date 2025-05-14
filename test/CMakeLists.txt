@@ -23,6 +23,10 @@ add_executable(route-fixed-term route.cpp)
 target_link_libraries(route-fixed-term PRIVATE buddy OpenMP::OpenMP_CXX)
 target_compile_definitions(route-fixed-term PRIVATE FIXED=1 TERM=1)
 
+add_executable(route-fixed-term-simd route.cpp)
+target_link_libraries(route-fixed-term-simd PRIVATE buddy OpenMP::OpenMP_CXX)
+target_compile_definitions(route-fixed-term-simd PRIVATE FIXED=1 TERM=1 SIMD=1)
+
 # if (OpenMP_CXX_FOUND)
 #     add_executable(route_sep_atomic route.cpp)
 #     target_link_libraries(route_sep_atomic PRIVATE buddy OpenMP::OpenMP_CXX)
