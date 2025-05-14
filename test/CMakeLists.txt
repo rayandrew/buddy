@@ -12,8 +12,12 @@ target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)
 add_executable(buddy-lat buddy-lat.cpp)
 target_link_libraries(buddy-lat PRIVATE buddy)
 
-add_executable(route route.cpp)
-target_link_libraries(route PRIVATE buddy OpenMP::OpenMP_CXX)
+add_executable(route-base route.cpp)
+target_link_libraries(route-base PRIVATE buddy OpenMP::OpenMP_CXX)
+
+add_executable(route-fixed route.cpp)
+target_link_libraries(route-fixed PRIVATE buddy OpenMP::OpenMP_CXX)
+target_compile_definitions(route-fixed PRIVATE FIXED=1)
 
 # if (OpenMP_CXX_FOUND)
 #     add_executable(route_sep_atomic route.cpp)
