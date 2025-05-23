@@ -26,6 +26,51 @@ const size_t out_header_size =
   in_header_size;
 #endif
 
+#if defined(SIMD) && defined(TERM) && defined(FIXED)
+void route_simd8(char *out_buf, size_t out_idx[], size_t out_len, char *inbuf, size_t incount)
+{
+  CHECK(out_len < INT32_MAX);
+  __m512i vout_len_data = _mm512_set1_epi64(out_len/8);
+
+  size_t elsize = in_header_size + 8;
+
+  for (size_t chunk_ind = 0; chunk_ind < incount-7; chunk_ind += 8) {
+    alignas(64) uint64_t dst_chunk[8];
+    alignas(64) uint64_t data_chunk[8];
+
+    char *chunk = inbuf + chunk_ind*elsize;
+
+    for (int i = 0; i < 8; i++)
+      dst_chunk[i] = *((int32_t *)(chunk + i*elsize));
+    for (int i = 0; i < 8; i++)
+      data_chunk[i] = *((uint64_t *)(chunk + i*elsize + in_header_size));
+
+    __m512i vdst = _mm512_load_epi64(dst_chunk);
+    __m512i vdata = _mm512_load_epi64(data_chunk);
+
+    __m512i vout_idx = _mm512_i64gather_epi64(vdst, out_idx, 8);
+
+    __m512i vconflict = _mm512_conflict_epi64(vdst);
+    __m512i vcount = _mm512_popcnt_epi64(vconflict);
+
+    __m512i voff_base = _mm512_mul_epi32(vdst, vout_len_data);
+    __m512i voff_idx = _mm512_add_epi64(voff_base, vout_idx);
+    __m512i voff_adj = _mm512_add_epi64(voff_idx, vcount);
+
+    _mm512_i64scatter_epi64(out_buf, voff_adj, vdata, 8);
+
+    for (int i = 0; i < 8; i++)
+      out_idx[dst_chunk[i]] += 1;
+  }
+
+  size_t remain = incount % 8;
+  if (remain) {
+    CHECK(!"TODO");
+  }
+
+}
+#endif
+
 size_t init_buf(char *inbuf, size_t incount, uint32_t datasize, unsigned num_out)
 {
     std::default_random_engine rand_engine(omp_get_thread_num());
@@ -98,7 +143,8 @@ int main(int argc, char **argv)
 #pragma omp parallel
   {
     char *inbuf = (char *)malloc(insize);
-    size_t max_out = init_buf(inbuf, incount, datasize, num_out);
+    init_buf(inbuf, incount, datasize, num_out);
+    size_t max_out = incount;
 
 #ifdef FIXED
     size_t out_idx[num_out] = {0};
@@ -106,11 +152,13 @@ int main(int argc, char **argv)
     buddy::ReqBufWrite outwriters[num_out];
 #endif
 
-    char *outbufs[num_out];
     size_t out_len = max_out * (out_header_size + datasize);
+    char *buf = (char *)malloc(out_len * num_out);
+    memset(buf, 0, out_len * num_out);
+
+    char *outbufs[num_out];
     for (unsigned i = 0; i < num_out; i++) {
-      outbufs[i] = (char *)malloc(out_len);
-      memset(outbufs[i], 0, out_len);
+      outbufs[i] = buf + out_len*i;
 #ifndef FIXED
       new (&outwriters[i]) buddy::ReqBufWrite(outbufs[i], out_len);
 #endif
@@ -119,6 +167,19 @@ int main(int argc, char **argv)
 #pragma omp barrier
     auto t0 = std::chrono::high_resolution_clock::now();
 
+#ifdef SIMD
+    switch (datasize) {
+      case 8:
+        route_simd8(outbufs[0], out_idx, out_len, inbuf, incount);
+        break;
+      default:
+        CHECK(!"not implemented");
+    }
+
+    for (unsigned i = 0; i < num_out; i++)
+      out_idx[i] *= datasize;
+
+#else
 #ifdef FIXED
     size_t in_idx = 0;
     while (in_idx < insize) {
@@ -143,6 +204,7 @@ int main(int argc, char **argv)
       assert(ok);
       inreader.advance(head);
     }
+#endif
 #endif
 
 #pragma omp barrier
@@ -225,9 +287,7 @@ int main(int argc, char **argv)
 #pragma omp master
     CHECK(pclose(proc) == 0);
 
-    for (unsigned i = 0; i < num_out; i++)
-      free(outbufs[i]);
-
+    free(outbufs[0]);
     free(inbuf);
   }
 }
