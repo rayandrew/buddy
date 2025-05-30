@@ -24,11 +24,11 @@ env="env OMP_NUM_THREADS=$pcore OMP_PROC_BIND=$omp_bind"
 case "$ploc" in
     sock)
         mpirun -H intel01,intel02 -tag-output $env numactl -N0 "$build"/src/buddy-proxy > proxy.log &
-        mpi_sh=./intel_dpu.sh
+        mpi_sh="$JDB_CWD/intel_dpu.sh"
         ;;
     corun)
         mpirun -H intel01,intel02 -tag-output $env numactl -N1 "$build"/src/buddy-proxy > proxy.log &
-        mpi_sh=./intel_dpu.sh
+        mpi_sh="$JDB_CWD/intel_dpu.sh"
         ;;
     dpu)
         mpirun -H bf01,bf02 -tag-output $env "$dpu_build"/src/buddy-proxy > proxy.log &
