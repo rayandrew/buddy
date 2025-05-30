@@ -26,11 +26,12 @@ const size_t out_header_size =
   in_header_size;
 #endif
 
-#if defined(SIMD) && defined(TERM) && defined(FIXED)
+#if defined(SIMD) && defined(FIXED)
 void route_simd4(char *out_buf, size_t real_out_idx[], size_t out_len, char *inbuf, size_t incount, unsigned num_out)
 {
-  CHECK(out_len < INT32_MAX);
-  __m512i vout_len_data = _mm512_set1_epi32(out_len/4);
+  size_t out_els = out_len/(4+out_header_size);
+  CHECK(out_els*num_out <= INT32_MAX);
+  __m512i vout_els = _mm512_set1_epi32(out_els);
 
   const size_t elsize = in_header_size + 4;
   const size_t chunksize = 16;
@@ -43,6 +44,7 @@ void route_simd4(char *out_buf, size_t real_out_idx[], size_t out_len, char *inb
 
     char *chunk = inbuf + chunk_ind*elsize;
 
+    // Maybe this can be smarter
     for (size_t i = 0; i < chunksize; i++)
       dst_chunk[i] = *((int32_t *)(chunk + i*elsize));
     for (size_t i = 0; i < chunksize; i++)
@@ -56,12 +58,29 @@ void route_simd4(char *out_buf, size_t real_out_idx[], size_t out_len, char *inb
     __m512i vconflict = _mm512_conflict_epi32(vdst);
     __m512i vcount = _mm512_popcnt_epi32(vconflict);
 
-    __m512i voff_base = _mm512_mullo_epi32(vdst, vout_len_data);
+    __m512i voff_base = _mm512_mullo_epi32(vdst, vout_els);
     __m512i voff_idx = _mm512_add_epi32(voff_base, vout_idx);
     __m512i voff_adj = _mm512_add_epi32(voff_idx, vcount);
 
+#ifdef TERM
     _mm512_i32scatter_epi32(out_buf, voff_adj, vdata, 4);
+#else
+    // correct order?
+    __m256i voff_adj_lo = _mm512_extracti64x4_epi64(voff_adj, 0);
+    __m256i voff_adj_hi = _mm512_extracti64x4_epi64(voff_adj, 1);
 
+    __m512i vpack_lo = _mm512_unpacklo_epi32(vdst, vdata);
+    __m512i vpack_hi = _mm512_unpackhi_epi32(vdst, vdata);
+
+    _mm512_i32scatter_epi64(out_buf, voff_adj_lo, vpack_lo, 8);
+    _mm512_i32scatter_epi64(out_buf, voff_adj_hi, vpack_hi, 8);
+#endif
+
+    // Potentially we could reorder a bit and scatter vout_idx+vcount back into
+    // out_idx instead of this loop?
+    // "writes to overlapping vector indices are guaranteed to be ordered with respect to each other (from LSB to MSB of the source registers)"
+    // "If two or more destination indices completely overlap, the “earlier” write(s) may be skipped."
+    // https://www.felixcloutier.com/x86/vpscatterdd:vpscatterdq:vpscatterqd:vpscatterqq
     for (size_t i = 0; i < chunksize; i++)
       out_idx[dst_chunk[i]] += 1;
   }
@@ -77,6 +96,10 @@ void route_simd4(char *out_buf, size_t real_out_idx[], size_t out_len, char *inb
 
 void route_simd8(char *out_buf, size_t out_idx[], size_t out_len, char *inbuf, size_t incount)
 {
+#ifndef TERM
+  CHECK(!"TODO");
+#endif
+
   CHECK(out_len < INT32_MAX);
   __m512i vout_len_data = _mm512_set1_epi64(out_len/8);
 
@@ -228,7 +251,7 @@ int main(int argc, char **argv)
     }
 
     for (unsigned i = 0; i < num_out; i++)
-      out_idx[i] *= datasize;
+      out_idx[i] *= out_header_size + datasize;
 
 #else
 #ifdef FIXED
@@ -286,51 +309,55 @@ int main(int argc, char **argv)
 
     for (int thread = 0; thread < omp_get_num_threads(); thread++) {
 #pragma omp barrier
-      if (thread == omp_get_thread_num()) {
-        for (unsigned i = 0; i < num_out; i++) {
-          size_t n;
-#ifdef FIXED
-          n = out_idx[i];
-#else
-          n = outwriters[i].get_pos();
-#endif
-          size_t m = n / (out_header_size + datasize);
-          // printf("%zu = %zu\n", n, m);
-          CHECK(fwrite(&m, sizeof(m), 1, proc));
+      if (thread != omp_get_thread_num())
+        continue;
 
-          buddy::request_head *head;
-          char *data;
+      for (unsigned i = 0; i < num_out; i++) {
+//printf("%u\t", i);
+        size_t n;
 #ifdef FIXED
-          buddy::request_head stack_head;
-          head = &stack_head;
-          for (size_t idx = 0; idx < out_idx[i];) {
-            head->size = datasize;
+        n = out_idx[i];
+#else
+        n = outwriters[i].get_pos();
+#endif
+        size_t m = n / (out_header_size + datasize);
+        // printf("%zu = %zu\n", n, m);
+        CHECK(fwrite(&m, sizeof(m), 1, proc));
+
+        buddy::request_head *head;
+        char *data;
+#ifdef FIXED
+        buddy::request_head stack_head;
+        head = &stack_head;
+        for (size_t idx = 0; idx < out_idx[i];) {
+          head->size = datasize;
 
 #ifdef TERM
-            head->dst = i;
+          head->dst = i;
 #else
-            head->dst = *((int32_t *)(outbufs[i]+idx));
-            idx += sizeof(int32_t);
+          head->dst = *((int32_t *)(outbufs[i]+idx));
+          idx += sizeof(int32_t);
 #endif
 
-            data = outbufs[i] + idx;
-            idx += datasize;
+          data = outbufs[i] + idx;
+          idx += datasize;
 #else
-          buddy::ReqBufRead reader(outbufs[i], n);
-          while (reader.next(&head, &data)) {
+        buddy::ReqBufRead reader(outbufs[i], n);
+        while (reader.next(&head, &data)) {
 #endif
 
-            /*
-            for (uint32_t j = 0; j < datasize; j++)
-              printf("%.2X ", (uint8_t)data[j]);
-            printf("\n");
-            */
+          /*
+          for (uint32_t j = 0; j < datasize; j++)
+            printf("%.2X ", (uint8_t)data[j]);
+          printf("\n");
+          */
 
-            CHECK(fwrite(&head->size, sizeof(head->size), 1, proc));
-            CHECK(fwrite(&head->dst, sizeof(head->dst), 1, proc));
-            CHECK(fwrite(data, datasize, 1, proc));
-          }
+          CHECK(fwrite(&head->size, sizeof(head->size), 1, proc));
+          CHECK(fwrite(&head->dst, sizeof(head->dst), 1, proc));
+          CHECK(fwrite(data, datasize, 1, proc));
+//printf("%d:%d\t", head->dst, *(int*)data);
         }
+//printf("\n");
       }
     }
 
