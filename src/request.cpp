@@ -40,7 +40,7 @@ char *ReqBufWrite::append_head(request_head head)
 {
   assert(sizeof(head) + head.size <= len);
 
-  if (pos + sizeof(head) + head.size > len)
+  if (!space_for(head.size))
     return NULL;
 
   memcpy(buf + pos, &head, sizeof(head));

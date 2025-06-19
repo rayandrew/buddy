@@ -47,6 +47,11 @@ class ReqBufRead {
       len = new_len;
     }
 
+    bool finished()
+    {
+      return pos == len;
+    }
+
     bool next(request_head **head, char **data);
     bool peek(request_head **head, char **data);
     void advance(request_head *head);
@@ -82,13 +87,18 @@ class ReqBufWrite {
       return pos;
     }
 
+    bool space_for(size_t size)
+    {
+      return pos + sizeof(request_head) + size <= len;
+    }
+
     char *append_head(request_head head);
     bool append(request_head head, const char *data);
 
   private:
-    char *buf;
-    size_t len;
-    size_t pos;
+    char *buf = NULL;
+    size_t len = 0;
+    size_t pos = 0;
 };
 
 class AtomicReqBufWrite {

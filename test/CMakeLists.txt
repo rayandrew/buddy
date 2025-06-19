@@ -9,6 +9,8 @@ add_executable(histo histo.cpp)
 target_link_libraries(histo PRIVATE buddy)
 target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)
 
+add_subdirectory(bale)
+
 add_executable(buddy-lat buddy-lat.cpp)
 target_link_libraries(buddy-lat PRIVATE buddy)
 
