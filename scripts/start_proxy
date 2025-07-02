@@ -1,0 +1,10 @@
+#!/bin/bash -e
+
+# Only start 1 per node
+[[ "$OMPI_COMM_WORLD_LOCAL_RANK" -gt 0 ]] && exit
+
+: ${BUDDY_DPU?}
+: ${DPU_BUILD?}
+
+ssh "$BUDDY_DPU" bash -c '"while pkill buddy-proxy; do :; done"'
+exec ssh "$BUDDY_DPU" "$DPU_BUILD/src/buddy-proxy"
