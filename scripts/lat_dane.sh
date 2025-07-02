@@ -36,7 +36,7 @@ for ploc in sock corun; do
 
     srun --overlap --ntasks-per-node=1 --label --cpu-bind="mask_cpu:$dpumask" $env "$build"/src/buddy-proxy > "proxy-$SLURM_JOB_ID.log" &
 
-    srun --overlap --ntasks-per-node=1 --cpu-bind="mask_cpu:$compmask" ./hostname_dpu.sh "$build"/test/buddy-lat
+    srun --overlap --ntasks-per-node=1 --cpu-bind="mask_cpu:$compmask" scripts/hostname_dpu.sh "$build"/test/buddy-lat
 
     wait -n
 done

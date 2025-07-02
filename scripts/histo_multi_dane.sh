@@ -54,7 +54,7 @@ srun --overlap --ntasks-per-node=1 --label --cpu-bind="mask_cpu:$dpumask" $env "
 sleep 1
 
 # start app
-srun --overlap --ntasks-per-node="$node_ranks" --cpu-bind="mask_cpu:$compmask" ./hostname_dpu.sh "$build"/test/histo "$bins" "$load" 1 > "histo-$fileid.log"
+srun --overlap --ntasks-per-node="$node_ranks" --cpu-bind="mask_cpu:$compmask" scripts/hostname_dpu.sh "$build"/test/histo "$bins" "$load" 1 > "histo-$fileid.log"
 
 wait -n
 
