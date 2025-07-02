@@ -139,7 +139,7 @@ spmat_dataset_t * open_sparse_matrix_write(char * dirname, sparsemat_t * A){
   mkdir(dirname, 0770);
   
   /* write metadata file */
-  int ret = write_sparse_matrix_metadata(spd);
+  [[maybe_unused]] int ret = write_sparse_matrix_metadata(spd);
   assert(ret == 0);
   
   return(spd);

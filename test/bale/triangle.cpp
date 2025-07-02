@@ -165,7 +165,7 @@ int main(int argc, char * argv[]) {
   }
 
   /* if we are using alg 1, we need U too */
-  sparsemat_t * U;
+  sparsemat_t * U = NULL;
   if(args.alg == 1) U = transpose_matrix(L);
 
   lgp_barrier();
