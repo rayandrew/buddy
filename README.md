@@ -29,6 +29,9 @@ This section lists environment variables that control Buddy.
 - `BUDDY_DPU`: Network host of the local DPU.
 - `BUDDY_TRACE`: Verbosity value from 1-3 to log API calls.
 
+If `BUDDY_DPU` is not set, the DPU address is configured with the contents of
+the file `/usr/local/etc/buddy_dpu`.
+
 ### DPU Agent
 
 - `BUDDY_TRACE`: Set it 1 to log API calls.
