@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <unistd.h>
 #include <assert.h>
 #include <mpi.h>
@@ -69,6 +70,12 @@ DpuConn::DpuConn(MPI_Comm world_comm, int32_t h2d_size, int32_t d2h_size)
   CHECK_MPI(MPI_Comm_split(world_comm, local_rank == 0 ? 0 : MPI_UNDEFINED, 0, &leader_comm));
 
   char *host = getenv("BUDDY_DPU");
+  if (!host || !*host) {
+    const size_t maxlen = 256;
+    std::ifstream fs("/usr/local/etc/buddy_dpu");
+    host = new char[maxlen];
+    fs.getline(host, maxlen);
+  }
   CHECK(host && *host);
 
   int world_size = 0;
