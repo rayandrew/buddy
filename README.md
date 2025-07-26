@@ -1,24 +1,37 @@
-# buddy
+# Buddy: communication offloading engine on DPU
+
+Two components:
+- `libbuddy.so`: The client library that interacts with the application. Its APIs are defined in `src/buddy.h`.
+- `buddy-proxy`: The DPU routing agent. It runs on BlueField smartNIC DPU or x86 platforms.
+
+## Dependency: 
+- CMake version 3.9 and above
+- MPI
+- OpenMP
 
 ## Build
+First, on the host, build the host component:
 
-Builds two components:
-- `libbuddy.so`: Client library with the interface in `src/buddy.h`.
-- `buddy-proxy`: The DPU routing agent.
-
-Debug build:
-
-    mkdir build-dbg
-    cd build-dbg
-    cmake .. -DCMAKE_BUILD_TYPE=Debug
+    mkdir build-host && cd build-host
+    cmake .. -DCMAKE_BUILD_TYPE=[Release|Debug]
     make
 
-Release build:
+Then, on the DPU, build the DPU agent:
 
-    mkdir build-rel
-    cd build-rel
-    cmake .. -DCMAKE_BUILD_TYPE=Release
+    mkdir build-dpu && cd build-dpu
+    cmake .. -DCMAKE_BUILD_TYPE=[Release|Debug]
     make
+
+## Run
+First, on the DPU, start the DPU agent:
+
+    ./build-dpu/src/buddy-proxy 
+
+
+Then, on the host, start the program. For example,
+
+    /build-host$ BUDDY_DPU=bf01 mpirun -np 16 ./test/histo 10000 1000000 1
+
 
 ## Configuration
 
@@ -26,11 +39,8 @@ This section lists environment variables that control Buddy.
 
 ### Client
 
-- `BUDDY_DPU`: Network host of the local DPU.
+- `BUDDY_DPU`: Network host of the local DPU. The DPU address is configured in the contents of `/usr/local/etc/buddy_dpu`.
 - `BUDDY_TRACE`: Verbosity value from 1-3 to log API calls.
-
-If `BUDDY_DPU` is not set, the DPU address is configured with the contents of
-the file `/usr/local/etc/buddy_dpu`.
 
 ### DPU Agent
 
