@@ -233,6 +233,8 @@ sparsemat_t *       kronecker_product_graph_dist(sparsemat_t * B, sparsemat_t * 
 
 sparsemat_t *       permute_matrix(sparsemat_t * A, SHARED int64_t *rperminv, SHARED int64_t *cperminv);
 sparsemat_t *       permute_matrix_conveyor(sparsemat_t * A, SHARED int64_t * rperminv, SHARED int64_t * cperminv);
+sparsemat_t *       permute_matrix_buddy(sparsemat_t * A, SHARED int64_t * rperminv, SHARED int64_t * cperminv);
+
 sparsemat_t *       permute_matrix_exstack2(sparsemat_t * A, SHARED int64_t * rperminv, SHARED int64_t * cperminv, int64_t buf_cnt);
 sparsemat_t *       permute_matrix_exstack(sparsemat_t * A, SHARED int64_t * rperminv, SHARED int64_t * cperminv, int64_t buf_cnt);
 sparsemat_t *       permute_matrix_agp(sparsemat_t * A, SHARED int64_t * rperminv, SHARED int64_t * cperminv);
@@ -253,6 +255,8 @@ int                 spmat_are_eq_doubles(double a, double b);
   
 sparsemat_t *       transpose_matrix(sparsemat_t * A);
 sparsemat_t *       transpose_matrix_conveyor(sparsemat_t * A);
+sparsemat_t *       transpose_matrix_buddy(sparsemat_t * A);
+
 sparsemat_t *       transpose_matrix_exstack2(sparsemat_t * A, int64_t buf_cnt);
 sparsemat_t *       transpose_matrix_exstack(sparsemat_t * A, int64_t buf_cnt);
 sparsemat_t *       transpose_matrix_agp(sparsemat_t * A);
