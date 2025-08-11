@@ -178,9 +178,9 @@ sparsemat_t * permute_matrix_buddy(sparsemat_t * A, SHARED int64_t * rperm, SHAR
  * \return a pointer to the matrix that has been produced or NULL if the model can't be used
  */
 sparsemat_t * transpose_matrix_buddy(sparsemat_t * A) {
-  int64_t ret, pe;
-  int64_t lnnz, i, col, row, fromth; 
-  int64_t idx, idxp;
+  int64_t pe;
+  int64_t lnnz, i, col, row;
+  int64_t idxp;
 
   /* get the colcnts */
   int64_t lnumcols = (A->numrows + THREADS - MYTHREAD - 1)/THREADS;  
@@ -234,7 +234,7 @@ sparsemat_t * transpose_matrix_buddy(sparsemat_t * A) {
   else
     convey_begin(cnv_rd, sizeof(edge_t), 0);
 
-  uint64_t numtimespop=0;
+  int64_t numtimespop=0;
   edge_t edge;
   w_edge_t wedge;  
   i = row = 0;

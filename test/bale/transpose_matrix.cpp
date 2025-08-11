@@ -85,11 +85,11 @@ int main(int argc, char * argv[])
   if(!inmat){T0_fprintf(stderr, "ERROR: transpose: inmat is NULL!\n");return(-1);}
 
   if(args.std.dump_files) write_matrix_mm(inmat, "transpose_inmat");
-  sparsemat_t * outmat;
   char model_str[32];
   int64_t error = 0;
-  int write_out = 0;
 #if 0
+  sparsemat_t * outmat;
+  int write_out = 0;
   double t1;
   int64_t use_model;
   minavgmaxD_t stat[1];
@@ -142,7 +142,7 @@ int main(int argc, char * argv[])
   }
   
 #endif
-  outmat = transpose_matrix_buddy(inmat);
+  transpose_matrix_buddy(inmat);
   sprintf(model_str, "Buddy");
 
   //clear_matrix(inmat);
