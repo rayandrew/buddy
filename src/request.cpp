@@ -32,8 +32,22 @@ bool ReqBufRead::peek(request_head **out_head, char **out_data)
 
 void ReqBufRead::advance(request_head *head)
 {
-  pos += sizeof(request_head) + head->size;
+  size_t off = sizeof(request_head) + head->size;
+  pos += off;
   assert(pos <= len);
+  unpull_len = off;
+}
+
+bool ReqBufRead::unpull()
+{
+  if (unpull_len) {
+    assert(pos >= unpull_len);
+    pos -= unpull_len;
+    unpull_len = 0;
+    return true;
+  } else {
+    return false;
+  }
 }
 
 char *ReqBufWrite::append_head(request_head head)

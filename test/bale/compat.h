@@ -10,6 +10,8 @@
 #define lgp_global_exit(x) MPI_Abort(MPI_COMM_WORLD, x)
 #define lgp_barrier() MPI_Barrier(MPI_COMM_WORLD)
 
+#define wall_seconds() MPI_Wtime()
+
 extern int THREADS;
 extern int MYTHREAD;
 

@@ -19,6 +19,7 @@ class ReqBufRead {
       : buf(NULL)
       , len(0)
       , pos(0)
+      , unpull_len(0)
     {}
 
     ReqBufRead(char *buf, size_t len)
@@ -35,6 +36,7 @@ class ReqBufRead {
     inline void reset_pos()
     {
       pos = 0;
+      unpull_len = 0;
     }
 
     inline void reset_len(size_t new_len)
@@ -45,6 +47,7 @@ class ReqBufRead {
 
       pos = 0;
       len = new_len;
+      unpull_len = 0;
     }
 
     bool finished()
@@ -55,11 +58,13 @@ class ReqBufRead {
     bool next(request_head **head, char **data);
     bool peek(request_head **head, char **data);
     void advance(request_head *head);
+    bool unpull();
 
   private:
     char *buf;
     size_t len;
     size_t pos;
+    size_t unpull_len;
 };
 
 class ReqBufWrite {

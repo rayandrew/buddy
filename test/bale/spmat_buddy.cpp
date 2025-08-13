@@ -3,6 +3,7 @@
 #include "compat.h"
 #include <iostream>
 #include <inttypes.h>
+#include <assert.h>
 
 #if 0
 /*! \brief apply row and column permutations to a sparse matrix using conveyors 
