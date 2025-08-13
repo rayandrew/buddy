@@ -209,7 +209,7 @@ sparsemat_t * transpose_matrix_buddy(sparsemat_t * A) {
   }
   convey_free(cnv_cnt);
 
-  int64_t sum = lgp_reduce_add_l(lnnz);
+  [[maybe_unused]] int64_t sum = lgp_reduce_add_l(lnnz);
   assert( A->nnz == sum ); 
   
   sparsemat_t * At = init_matrix(A->numcols, A->numrows, lnnz, weighted);
