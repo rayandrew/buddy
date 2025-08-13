@@ -57,7 +57,14 @@ double ig_buddy(int64_t *tgt, int64_t *pckindx, int64_t l_num_req,  int64_t *lta
 
   i = 0;
   int64_t outstanding = 0;
-  int64_t max_outstanding = INT64_MAX;
+  //int64_t max_outstanding = INT64_MAX;
+
+  // We need to ensure to have space for replies in the send buffer.
+  // A better way to do it might be to track the number of requests in the current send buffer instead?
+  const size_t BUDDY_MAXLEN = 1*1024*1024;
+  size_t BUDDY_HEADER_SIZE = 8;
+  size_t msgsize = BUDDY_HEADER_SIZE + sizeof(pkg);
+  int64_t max_outstanding = BUDDY_MAXLEN/msgsize/2;
 
   while (convey_advance(c, (i == l_num_req || outstanding == max_outstanding))) {
     for (; i < l_num_req && outstanding < max_outstanding; i++) {
