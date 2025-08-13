@@ -15,19 +15,33 @@
 
 namespace buddy::host {
 
+uint32_t lookup_ip(const char *host)
+{
+  uint32_t ip;
+
+  struct hostent *ent = gethostbyname(host);
+  CHECK(ent);
+  CHECK(ent->h_addrtype == AF_INET);
+  CHECK(ent->h_length == sizeof(ip));
+  memcpy(&ip, *ent->h_addr_list, sizeof(ip));
+
+  return ip;
+}
+
 uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, MPI_Comm world_comm, int world_size)
 {
-  uint32_t dpu_ip;
+  uint32_t dpu_ip = lookup_ip(dpu_host);
 
   uint32_t *table = NULL;
-  if (leader_comm != MPI_COMM_NULL)
+  if (leader_comm != MPI_COMM_NULL) {
     table = new uint32_t[world_size];
 
-  struct hostent *dpu_ent = gethostbyname(dpu_host);
-  CHECK(dpu_ent);
-  CHECK(dpu_ent->h_addrtype == AF_INET);
-  CHECK(dpu_ent->h_length == sizeof(dpu_ip));
-  memcpy(&dpu_ip, *dpu_ent->h_addr_list, sizeof(dpu_ip));
+    // The address in the table has to be reachable from other nodes
+    int num_nodes;
+    CHECK_MPI(MPI_Comm_size(leader_comm, &num_nodes));
+    if (num_nodes > 1)
+      CHECK(dpu_ip != lookup_ip("localhost"));
+  }
 
   // Gather from all ranks
   CHECK_MPI(MPI_Gather(&dpu_ip, sizeof(dpu_ip), MPI_BYTE, table, sizeof(dpu_ip), MPI_BYTE, 0, world_comm));
@@ -116,6 +130,7 @@ DpuConn::DpuConn(MPI_Comm world_comm, int32_t h2d_size, int32_t d2h_size)
     dma_buf->send(sock);
 #endif
 
+  // Wait for proxy to finish all setup
   char x;
   full_read(sock, &x, 1);
 
