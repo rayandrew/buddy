@@ -14,6 +14,9 @@ add_subdirectory(bale)
 add_executable(buddy-lat buddy-lat.cpp)
 target_link_libraries(buddy-lat PRIVATE buddy)
 
+add_executable(buddy-bw buddy-bw.cpp)
+target_link_libraries(buddy-bw PRIVATE buddy)
+
 add_executable(route-base route.cpp)
 target_link_libraries(route-base PRIVATE buddy OpenMP::OpenMP_CXX)
 
