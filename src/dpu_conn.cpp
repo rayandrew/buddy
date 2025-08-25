@@ -54,6 +54,7 @@ uint32_t *make_address_table(const char *dpu_host, MPI_Comm leader_comm, MPI_Com
 }
 
 DpuConn::DpuConn(MPI_Comm world_comm, int32_t h2d_size, int32_t d2h_size)
+  : world_comm(world_comm)
 {
   int world_rank;
   CHECK_MPI(MPI_Comm_rank(world_comm, &world_rank));
@@ -139,6 +140,9 @@ DpuConn::DpuConn(MPI_Comm world_comm, int32_t h2d_size, int32_t d2h_size)
 
 DpuConn::~DpuConn()
 {
+  // QUIT is a collective operation since proxy exits immediately without
+  // waiting or draining buffers.
+  CHECK_MPI(MPI_Barrier(world_comm));
   qp.write_imm(IMM_QUIT);
   ibv_wc wc;
   qp.wait_send(&wc);
