@@ -18,9 +18,15 @@ int bandwidthTest(bool isSender, int pkgNum, buddy_buf* sendBuf, buddy_buf* recv
 
 int main(int argc, char **argv)
 {
+  if (argc != 2){
+    std::cerr << "Usage: " << argv[0] << " <pkgSize>\n";
+    return 1;
+  } else {
+    pkgSize = std::stoul(argv[1]);
+    MAXLEN = sizeof(buddy::request_head) + pkgSize;
+  }
+
   CHECK_MPI(MPI_Init(&argc, &argv));
-
-
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
   CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &size));
 
@@ -29,7 +35,6 @@ int main(int argc, char **argv)
   int counterPart = isSend ? rank + size / 2 : rank - size / 2;
 
   buddy_init(MPI_COMM_WORLD, MAXLEN, MAXLEN);
-
   buddy_buf *send_buf = buddy_alloc(MAXLEN);
   buddy_buf *recv_buf = buddy_alloc(MAXLEN);
 
@@ -43,12 +48,11 @@ int main(int argc, char **argv)
     const int pkgNum = 4096 * 8;
     CHECK(pkgNum > windowSize);
 
+    if(isSend)std::cout << "[*]Package Size: " << pkgSize << " Package Num: " << pkgNum << std::endl;
+
     bandwidthTest(isSend, pkgNum, send_buf, recv_buf);
-
     MPI_Barrier(MPI_COMM_WORLD);
-
     bandwidthTest(!isSend, pkgNum, send_buf, recv_buf);
-
   }
 
   buddy_free(recv_buf);
