@@ -3,15 +3,17 @@
 #include <request.h>
 #include "util_mpi.h"
 
+#include <vector>
+
 size_t payloadSize = -1;
 size_t pktSize = -1;
-const int windowSize = 64;
-const int aggregation = 256;
+int windowSize = 64;
+int aggregation = 256;
 size_t MAXLEN = -1;
 
 enum {
-  ID_SEND,
-  ID_RECV
+  ID_SEND = 114514,
+  ID_RECV = 191981,
 };
 
 int rank, size;
@@ -52,7 +54,7 @@ int main(int argc, char **argv)
 
     bandwidthTest(isSend, counterPart, pktNum);
     MPI_Barrier(MPI_COMM_WORLD);
-    bandwidthTest(!isSend, counterPart, pktNum);
+    // bandwidthTest(!isSend, counterPart, pktNum);
   }
 
 
@@ -77,12 +79,12 @@ void wait_for(uint64_t id, size_t size)
   }
 }
 
-auto bandwidthTestSender(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
+auto bandwidthTestSender(const int pktNum, std::vector<buddy_buf*>& sendBuf, std::vector<buddy_buf*>& recvBuf) {
   auto start = MPI_Wtime();
 
   int sentRegisterPktNum = 0;
 
-  for (int i = 0; i < windowSize; i++) buddy_send(sendBuf, pktSize*aggregation, 0, ID_SEND);
+  for (int i = 0; i < windowSize; i++) buddy_send(sendBuf[i], pktSize*aggregation, 0, i);
   sentRegisterPktNum = windowSize * aggregation;
 
   uint64_t ids[windowSize];
@@ -92,10 +94,10 @@ auto bandwidthTestSender(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvBu
     int n = buddy_poll(ids, sizes, windowSize);
 
     for (int j = 0; j < n; j++) {
-      if(ids[j] == ID_SEND){
+      if(ids[j] < windowSize) {
         if (sentRegisterPktNum < pktNum) {
           const int pktSendThisTime = (pktNum-sentRegisterPktNum) >= aggregation ? aggregation : (pktNum-sentRegisterPktNum);
-          buddy_send(sendBuf, pktSendThisTime * pktSize, 0, ID_SEND);
+          buddy_send(sendBuf[ids[j]], pktSendThisTime * pktSize, 0, ids[j]); // reuse the buffer
           sentRegisterPktNum += pktSendThisTime;
           if (sentRegisterPktNum == pktNum) {
             break;
@@ -107,7 +109,7 @@ auto bandwidthTestSender(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvBu
 
   }
 
-  buddy_recv(recvBuf, MAXLEN, 0, ID_RECV);
+  buddy_recv(recvBuf[0], MAXLEN, 0, ID_RECV);
   wait_for(ID_RECV, sizeof(buddy::request_head) + 1);
   auto end = MPI_Wtime();
 
@@ -116,13 +118,11 @@ auto bandwidthTestSender(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvBu
 }
 
 
-int bandwidthTestReceiver(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
+int bandwidthTestReceiver(const int pktNum, std::vector<buddy_buf*>& sendBuf, std::vector<buddy_buf*>& recvBuf) {
 
-  // int recvRegisterPktNum = 0;
   int recvPktCount = 0;
 
-  for (int i = 0; i < windowSize; i++) buddy_recv(recvBuf, pktSize*aggregation, 0, ID_RECV);
-  // recvRegisterPktNum = windowSize * aggregation;
+  for (int i = 0; i < windowSize; i++) buddy_recv(recvBuf[i], pktSize*aggregation, 0, i);
 
   uint64_t ids[windowSize];
   uint64_t sizes[windowSize];
@@ -132,7 +132,7 @@ int bandwidthTestReceiver(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvB
     int n = buddy_poll(ids, sizes, windowSize);
 
     for (int j = 0; j < n; j++) {
-      if (ids[j] == ID_RECV) {
+      if (ids[j] < windowSize) {
         CHECK(sizes[j] % pktSize == 0);
         recvPktCount += sizes[j] / pktSize;
       } else {
@@ -140,13 +140,13 @@ int bandwidthTestReceiver(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvB
       }
 
       // really don't know how to exactly recv the pktNum
-      buddy_recv(recvBuf, MAXLEN, 0, ID_RECV);
+      buddy_recv(recvBuf[ids[j]], MAXLEN, 0, ids[j]); // reuse the buffer
     }
 
   }
 
-  ((buddy::request_head *)sendBuf->addr)->size = 1;
-  buddy_send(sendBuf, sizeof(buddy::request_head) + 1, 0, ID_SEND);
+  ((buddy::request_head *)sendBuf[0]->addr)->size = 1;
+  buddy_send(sendBuf[0], sizeof(buddy::request_head) + 1, 0, ID_SEND);
 
   wait_for(ID_SEND, 0); // keep the send buf valid
 
@@ -156,26 +156,31 @@ int bandwidthTestReceiver(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvB
 
 
 int bandwidthTest(bool isSender, int counterPart, int pktNum) {
-  MPI_Barrier(MPI_COMM_WORLD);
 
-  buddy_buf *sendBuf = nullptr;
-  buddy_buf *recvBuf = nullptr;
+  std::vector<buddy_buf*> sendBuf;
+  std::vector<buddy_buf*> recvBuf;
 
   double senderBW = 0.0;
 
   if (isSender) {
-    // buf preparation
-    sendBuf = buddy_alloc(MAXLEN);
-    recvBuf = buddy_alloc(1024); // for ack only
+    {
+      // Buffer preparation
+      buddy::request_head head = {.size = (uint32_t)payloadSize, .dst = counterPart};
 
-    buddy::request_head head = {.size = (uint32_t)payloadSize, .dst = counterPart};
-    for (int j = 0; j < aggregation; j++) {
-      memcpy((char *)sendBuf->addr + j*pktSize, &head, sizeof(head));
-      for (size_t i = 0; i < payloadSize; i++) {
-        ((char *)sendBuf->addr)[j*pktSize + sizeof(head) + i] = 0xff;
+      for (int i = 0; i < windowSize; i++) { // mempool
+        sendBuf.push_back(buddy_alloc(MAXLEN));
+        for (int j = 0; j < aggregation; j++) { // aggregation
+          memcpy((char *)sendBuf[i]->addr + j*pktSize, &head, sizeof(head)); // header
+          for (size_t k = 0; k < payloadSize; k++) { // payload
+            ((char *)sendBuf[i]->addr)[j*pktSize + sizeof(head) + k] = 0xff;
+          }
+        }
       }
+
+      recvBuf.push_back(buddy_alloc(1024)); // for ack only
     }
 
+    MPI_Barrier(MPI_COMM_WORLD);
     auto timeElapsed = bandwidthTestSender(pktNum, sendBuf, recvBuf);
 
     auto loadInByte = pktNum * (sizeof(buddy::request_head) + payloadSize);
@@ -183,20 +188,24 @@ int bandwidthTest(bool isSender, int counterPart, int pktNum) {
     std::cout << "Sender " << rank << " Bandwidth: " << senderBW << " MB/s" << std::endl;
 
   } else {
-    sendBuf = buddy_alloc(1024); // for ack only
-    recvBuf = buddy_alloc(MAXLEN);
 
+    for (int i = 0; i < windowSize; i++) {
+      recvBuf.push_back(buddy_alloc(MAXLEN));
+    }
+
+    sendBuf.push_back(buddy_alloc(1024)); // for ack only
     buddy::request_head head = {.size = (uint32_t)payloadSize, .dst = counterPart};
-    memcpy((char *)sendBuf->addr, &head, sizeof(head));
-    ((char *)sendBuf->addr)[sizeof(head)] = 0xff;
+    memcpy((char *)sendBuf[0]->addr, &head, sizeof(head));
+    ((char *)sendBuf[0]->addr)[sizeof(head)] = 0xff;
 
+    MPI_Barrier(MPI_COMM_WORLD);
     bandwidthTestReceiver(pktNum, sendBuf, recvBuf);
   }
 
   MPI_Barrier(MPI_COMM_WORLD);
 
-  buddy_free(recvBuf);
-  buddy_free(sendBuf);
+  for (auto buf : sendBuf) buddy_free(buf);
+  for (auto buf : recvBuf) buddy_free(buf);
 
   // aggregate
   double totalBW = 0.0;
