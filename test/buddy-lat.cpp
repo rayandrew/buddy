@@ -3,6 +3,7 @@
 #include <request.h>
 #include "util_mpi.h"
 
+// appro. buffer size for aggregation
 const size_t MAXLEN = 1*1024*1024;
 
 enum {
