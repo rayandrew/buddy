@@ -3,9 +3,11 @@
 #include <request.h>
 #include "util_mpi.h"
 
-size_t pkgSize = 8;
-const int windowSize = 256;
-size_t MAXLEN = sizeof(buddy::request_head) + pkgSize;
+size_t payloadSize = -1;
+size_t pktSize = -1;
+const int windowSize = 64;
+const int aggregation = 256;
+size_t MAXLEN = -1;
 
 enum {
   ID_SEND,
@@ -14,16 +16,17 @@ enum {
 
 int rank, size;
 
-int bandwidthTest(bool isSender, int pkgNum, buddy_buf* sendBuf, buddy_buf* recvBuf);
+int bandwidthTest(bool isSender, int counterPart, int pktNum);
 
 int main(int argc, char **argv)
 {
   if (argc != 2){
-    std::cerr << "Usage: " << argv[0] << " <pkgSize>\n";
+    std::cerr << "Usage: " << argv[0] << " <payloadSize>\n";
     return 1;
   } else {
-    pkgSize = std::stoul(argv[1]);
-    MAXLEN = sizeof(buddy::request_head) + pkgSize;
+    payloadSize = std::stoul(argv[1]);
+    pktSize = sizeof(buddy::request_head) + payloadSize;
+    MAXLEN = pktSize * aggregation;
   }
 
   CHECK_MPI(MPI_Init(&argc, &argv));
@@ -35,28 +38,23 @@ int main(int argc, char **argv)
   int counterPart = isSend ? rank + size / 2 : rank - size / 2;
 
   buddy_init(MPI_COMM_WORLD, MAXLEN, MAXLEN);
-  buddy_buf *send_buf = buddy_alloc(MAXLEN);
-  buddy_buf *recv_buf = buddy_alloc(MAXLEN);
-
-  buddy::request_head head = {.size = (uint32_t)pkgSize, .dst = counterPart};
-  memcpy(send_buf->addr, &head, sizeof(head));
-  for (size_t i = 0; i < pkgSize; i++) {
-    ((char *)send_buf->addr)[sizeof(head) + i] = 0xff;
-  }
+  
 
   {
-    const int pkgNum = 4096 * 8;
-    CHECK(pkgNum > windowSize);
+    const int pktNum = 128 * 1024; 
+    const int buddyPktNum = pktNum / aggregation;
 
-    if(isSend)std::cout << "[*]Package Size: " << pkgSize << " Package Num: " << pkgNum << std::endl;
+    CHECK(buddyPktNum >= windowSize);
 
-    bandwidthTest(isSend, pkgNum, send_buf, recv_buf);
+    if(isSend)std::cout << "[*]Packet Size: " << pktSize   << " Payload Size: " << payloadSize
+                        << " Packet Num: " << pktNum       << " Aggregation: " << aggregation
+                        << " Window Size: " << windowSize   << " MAXLEN: " << MAXLEN << std::endl;
+
+    bandwidthTest(isSend, counterPart, pktNum);
     MPI_Barrier(MPI_COMM_WORLD);
-    bandwidthTest(!isSend, pkgNum, send_buf, recv_buf);
+    bandwidthTest(!isSend, counterPart, pktNum);
   }
 
-  buddy_free(recv_buf);
-  buddy_free(send_buf);
 
   buddy_finalize();
   MPI_Finalize();
@@ -79,31 +77,27 @@ void wait_for(uint64_t id, size_t size)
   }
 }
 
-auto bandwidthTestSender(int pkgNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
+auto bandwidthTestSender(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
   auto start = MPI_Wtime();
 
-  ((buddy::request_head *)sendBuf->addr)->size = pkgSize;
+  int sentRegisterPktNum = 0;
 
-  int sentRegisterNum = 0;
-
-  for (int i = 0; i < windowSize; i++) {
-    buddy_send(sendBuf, sizeof(buddy::request_head) + pkgSize, 0, ID_SEND);
-  }
-
-  sentRegisterNum = windowSize;
+  for (int i = 0; i < windowSize; i++) buddy_send(sendBuf, pktSize*aggregation, 0, ID_SEND);
+  sentRegisterPktNum = windowSize * aggregation;
 
   uint64_t ids[windowSize];
   uint64_t sizes[windowSize];
 
-  for(;sentRegisterNum < pkgNum;) {
+  for(;sentRegisterPktNum < pktNum;) {
     int n = buddy_poll(ids, sizes, windowSize);
 
     for (int j = 0; j < n; j++) {
       if(ids[j] == ID_SEND){
-        if (sentRegisterNum < pkgNum) {
-          buddy_send(sendBuf, sizeof(buddy::request_head) + pkgSize, 0, ID_SEND);
-          sentRegisterNum++;
-          if (sentRegisterNum == pkgNum) {
+        if (sentRegisterPktNum < pktNum) {
+          const int pktSendThisTime = (pktNum-sentRegisterPktNum) >= aggregation ? aggregation : (pktNum-sentRegisterPktNum);
+          buddy_send(sendBuf, pktSendThisTime * pktSize, 0, ID_SEND);
+          sentRegisterPktNum += pktSendThisTime;
+          if (sentRegisterPktNum == pktNum) {
             break;
           }
         }
@@ -122,36 +116,31 @@ auto bandwidthTestSender(int pkgNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
 }
 
 
-int bandwidthTestReceiver(int pkgNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
+int bandwidthTestReceiver(const int pktNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
 
-  int recvRegisterNum = 0;
-  int recvCount = 0;
+  // int recvRegisterPktNum = 0;
+  int recvPktCount = 0;
 
-  for (int i = 0; i < windowSize; i++) {
-    buddy_recv(recvBuf, MAXLEN, 0, ID_RECV);
-  }
-
-  recvRegisterNum = windowSize;
+  for (int i = 0; i < windowSize; i++) buddy_recv(recvBuf, pktSize*aggregation, 0, ID_RECV);
+  // recvRegisterPktNum = windowSize * aggregation;
 
   uint64_t ids[windowSize];
   uint64_t sizes[windowSize];
 
-  for(;recvCount < pkgNum;) {
+  for(;recvPktCount < pktNum;) {
 
     int n = buddy_poll(ids, sizes, windowSize);
 
     for (int j = 0; j < n; j++) {
       if (ids[j] == ID_RECV) {
-        CHECK(sizes[j] == sizeof(buddy::request_head) + pkgSize);
-        recvCount++;
+        CHECK(sizes[j] % pktSize == 0);
+        recvPktCount += sizes[j] / pktSize;
       } else {
         CHECK(false);
       }
 
-      if(recvRegisterNum < pkgNum) {
-        buddy_recv(recvBuf, MAXLEN, 0, ID_RECV);
-        recvRegisterNum++;
-      }
+      // really don't know how to exactly recv the pktNum
+      buddy_recv(recvBuf, MAXLEN, 0, ID_RECV);
     }
 
   }
@@ -166,23 +155,48 @@ int bandwidthTestReceiver(int pkgNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
 }
 
 
-int bandwidthTest(bool isSender, int pkgNum, buddy_buf* sendBuf, buddy_buf* recvBuf) {
+int bandwidthTest(bool isSender, int counterPart, int pktNum) {
   MPI_Barrier(MPI_COMM_WORLD);
+
+  buddy_buf *sendBuf = nullptr;
+  buddy_buf *recvBuf = nullptr;
 
   double senderBW = 0.0;
 
   if (isSender) {
-    auto timeElapsed = bandwidthTestSender(pkgNum, sendBuf, recvBuf);
+    // buf preparation
+    sendBuf = buddy_alloc(MAXLEN);
+    recvBuf = buddy_alloc(1024); // for ack only
 
-    auto loadInByte = pkgNum * (sizeof(buddy::request_head) + pkgSize);
+    buddy::request_head head = {.size = (uint32_t)payloadSize, .dst = counterPart};
+    for (int j = 0; j < aggregation; j++) {
+      memcpy((char *)sendBuf->addr + j*pktSize, &head, sizeof(head));
+      for (size_t i = 0; i < payloadSize; i++) {
+        ((char *)sendBuf->addr)[j*pktSize + sizeof(head) + i] = 0xff;
+      }
+    }
+
+    auto timeElapsed = bandwidthTestSender(pktNum, sendBuf, recvBuf);
+
+    auto loadInByte = pktNum * (sizeof(buddy::request_head) + payloadSize);
     senderBW = loadInByte / timeElapsed / (1024 * 1024);  // MB/s
     std::cout << "Sender " << rank << " Bandwidth: " << senderBW << " MB/s" << std::endl;
 
   } else {
-    bandwidthTestReceiver(pkgNum, sendBuf, recvBuf);
+    sendBuf = buddy_alloc(1024); // for ack only
+    recvBuf = buddy_alloc(MAXLEN);
+
+    buddy::request_head head = {.size = (uint32_t)payloadSize, .dst = counterPart};
+    memcpy((char *)sendBuf->addr, &head, sizeof(head));
+    ((char *)sendBuf->addr)[sizeof(head)] = 0xff;
+
+    bandwidthTestReceiver(pktNum, sendBuf, recvBuf);
   }
 
   MPI_Barrier(MPI_COMM_WORLD);
+
+  buddy_free(recvBuf);
+  buddy_free(sendBuf);
 
   // aggregate
   double totalBW = 0.0;
