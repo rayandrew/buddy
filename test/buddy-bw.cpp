@@ -22,11 +22,13 @@ int bandwidthTest(bool isSender, int counterPart, int pktNum);
 
 int main(int argc, char **argv)
 {
-  if (argc != 2){
-    std::cerr << "Usage: " << argv[0] << " <payloadSize>\n";
+  if (argc != 4){
+    std::cerr << "Usage: " << argv[0] << " <payloadSize> <windowSize> <aggregation>\n";
     return 1;
   } else {
     payloadSize = std::stoul(argv[1]);
+    windowSize = std::stoi(argv[2]);
+    aggregation = std::stoi(argv[3]);
     pktSize = sizeof(buddy::request_head) + payloadSize;
     MAXLEN = pktSize * aggregation;
   }
