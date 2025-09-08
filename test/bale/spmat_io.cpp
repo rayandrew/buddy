@@ -503,7 +503,8 @@ int write_matrix_mm(sparsemat_t *A, const char * name) {
             fprintf(fp, "%" PRId64 " %" PRId64 " %lf\n",
                     row + 1,
                     A->lnonzero[j] + 1,
-                    A->value[j]);
+                    //A->value[j]);
+                    A->lvalue[j - A->loffset[0]]);
           else
             fprintf(fp, "%" PRId64 " %" PRId64 "\n",
                     row + 1,

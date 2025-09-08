@@ -22,6 +22,13 @@ inline int64_t lgp_reduce_add_l(int64_t x)
   return y;
 }
 
+inline double lgp_reduce_add_d(double x)
+{
+  double y;
+  CHECK_MPI(MPI_Allreduce(&x, &y, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD));
+  return y;
+}
+
 inline int64_t lgp_reduce_max_l(int64_t x)
 {
   int64_t y;

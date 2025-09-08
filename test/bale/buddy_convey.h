@@ -18,4 +18,5 @@ int convey_push(convey_t* c, const void* item, int64_t pe);
 int convey_pull(convey_t* c, void* item, int64_t* from);
 int convey_advance(convey_t* c, bool done);
 int convey_unpull(convey_t *c);
+int convey_reset(convey_t* c);
 int convey_free(convey_t* c);

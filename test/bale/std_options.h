@@ -86,9 +86,9 @@ void bale_app_finish(std_args_t * sargs); /*<! clean up after run */
 /*! write out a key, val pair */
 void bale_app_write_int(std_args_t * sargs, const char * key, int64_t val);
 /*! write out a key, val pair */
-void bale_app_write_double(std_args_t * sargs, char * key, double val);
+void bale_app_write_double(std_args_t * sargs, const char * key, double val);
 /*! \ingroup service_functions */
-void bale_app_write_time(std_args_t * sargs, char * model_str, double time); /*!< write out a simple wall clock timer */
+void bale_app_write_time(std_args_t * sargs, const char * model_str, double time); /*!< write out a simple wall clock timer */
 
 #endif
 

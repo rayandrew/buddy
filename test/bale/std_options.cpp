@@ -421,7 +421,7 @@ void bale_app_finish(std_args_t * sargs){
 /*! \brief Write the time of an app implmentation to stderr, or the json file.
  *
  */
-void bale_app_write_time(std_args_t * sargs, char * model_str, double time){
+void bale_app_write_time(std_args_t * sargs, const char * model_str, double time){
   if(sargs->json && !MYTHREAD){    
     FILE * jp = fopen(sargs->json_output, "a");
     fprintf(jp,"\"%s\": \"%lf\",\n", model_str, time);

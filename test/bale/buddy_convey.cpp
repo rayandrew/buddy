@@ -8,6 +8,12 @@ enum {
   TAG_SEND,
 };
 
+enum cstate {
+  STATE_DORMANT,
+  STATE_WORKING,
+  STATE_COMPLETE,
+};
+
 const size_t MAXLEN = 1*1024*1024;
 
 struct convey_t {
@@ -21,6 +27,7 @@ struct convey_t {
   int64_t local_balance;
   int64_t global_balance;
   MPI_Request balance_req;
+  cstate state;
 };
 
 convey_t* convey_new(size_t max_bytes, size_t n_local, const convey_alc8r_t* alloc, uint64_t options)
@@ -40,18 +47,26 @@ convey_t* convey_new(size_t max_bytes, size_t n_local, const convey_alc8r_t* all
 
   conv->balance_req = MPI_REQUEST_NULL;
 
+  conv->state = STATE_DORMANT;
+
   return conv;
 }
 
 int convey_begin(convey_t* c, size_t item_bytes, size_t align)
 {
+  CHECK(c->state == STATE_DORMANT);
+  c->state = STATE_WORKING;
+
   c->item_bytes = item_bytes;
   CHECK(align == 0);
+
   return convey_OK;
 }
 
 int convey_push(convey_t* c, const void* item, int64_t pe)
 {
+  CHECK(c->state == STATE_WORKING);
+
   buddy::request_head head = {.size = (uint32_t)c->item_bytes, .dst = (int32_t)pe};
   assert(c->item_bytes == head.size);
   assert(pe == head.dst);
@@ -66,6 +81,8 @@ int convey_push(convey_t* c, const void* item, int64_t pe)
 
 int convey_pull(convey_t* c, void* item, int64_t* from)
 {
+  CHECK(c->state != STATE_DORMANT);
+
   buddy::request_head *head;
   char *data;
 
@@ -84,6 +101,8 @@ int convey_pull(convey_t* c, void* item, int64_t* from)
 
 int convey_unpull(convey_t *c)
 {
+  CHECK(c->state != STATE_DORMANT);
+
   if (c->reader.unpull()) {
     c->local_balance++;
     return 1;
@@ -94,6 +113,17 @@ int convey_unpull(convey_t *c)
 
 int convey_advance(convey_t* c, bool done)
 {
+  if (c->state == STATE_COMPLETE) {
+    assert(c->writer.empty());
+    assert(!c->sending);
+    assert(c->reader.empty());
+    assert(c->recving);
+    assert(c->balance_req == MPI_REQUEST_NULL);
+    assert(c->global_balance == 0);
+
+    return convey_DONE;
+  }
+
   if (!c->writer.empty() && !c->sending && (done || !c->writer.space_for(c->item_bytes))) {
     c->sending = true;
     buddy_send(c->send_buf, c->writer.get_pos(), 0, TAG_SEND);
@@ -128,10 +158,28 @@ int convey_advance(convey_t* c, bool done)
     int flag;
     CHECK_MPI(MPI_Test(&c->balance_req, &flag, MPI_STATUS_IGNORE));
     if (flag) {
-      if (c->global_balance == 0)
+      if (c->global_balance == 0) {
+        c->state = STATE_COMPLETE;
         return convey_DONE;
+      }
     }
   }
+
+  return convey_OK;
+}
+
+int convey_reset(convey_t* c)
+{
+  CHECK(c->state == STATE_COMPLETE);
+
+  assert(c->writer.empty());
+  assert(!c->sending);
+  assert(c->reader.empty());
+  assert(c->recving);
+  assert(c->balance_req == MPI_REQUEST_NULL);
+  assert(c->global_balance == 0);
+
+  c->state = STATE_DORMANT;
 
   return convey_OK;
 }

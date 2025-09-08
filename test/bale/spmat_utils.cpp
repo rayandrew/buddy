@@ -1179,7 +1179,7 @@ sparsemat_t * init_matrix(int64_t numrows, int64_t numcols, int64_t nnz_this_thr
   }
   mat->loffset  =  lgp_local_part(int64_t, mat->offset);
   */
-  mat->offset = NULL;
+  mat->offset = (int64_t *)1;
   mat->loffset = (int64_t *)malloc((mat->numrows + THREADS) * sizeof(int64_t) / THREADS);
 
   int64_t max = lgp_reduce_max_l(nnz_this_thread);
@@ -1194,7 +1194,7 @@ sparsemat_t * init_matrix(int64_t numrows, int64_t numcols, int64_t nnz_this_thr
   }
   mat->lnonzero = lgp_local_part(int64_t, mat->nonzero);
   */
-  mat->nonzero = NULL;
+  mat->nonzero = (int64_t *)1;
   mat->lnonzero = (int64_t *)malloc(max*sizeof(int64_t));
 
   if(weighted){
@@ -1207,7 +1207,7 @@ sparsemat_t * init_matrix(int64_t numrows, int64_t numcols, int64_t nnz_this_thr
     }
     mat->lvalue = lgp_local_part(double, mat->value);
     */
-    mat->value = NULL;
+    mat->value = (double*)1;
     mat->lvalue = (double *)malloc(max*sizeof(double));
   }else{
     mat->value = NULL;
@@ -1643,9 +1643,6 @@ int w_edge_comp(const void *a, const void *b)
   return( A->row - B->row );
 }
 
-#if 0
-
-
 /*! 
  * \brief initializes the struct that holds a distributed array of doubles
  * \param num total number of entries
@@ -1654,15 +1651,13 @@ int w_edge_comp(const void *a, const void *b)
  */
 d_array_t * init_d_array(int64_t num) 
 {
-  d_array_t * array = calloc(1, sizeof(d_array_t));
+  d_array_t * array = (d_array_t *)calloc(1, sizeof(d_array_t));
   array->num  = num;
   array->lnum = (num + THREADS - MYTHREAD - 1)/THREADS;
-  array->entry   = lgp_all_alloc(num + THREADS, sizeof(double));
-  if(array->entry == NULL){
-    T0_printf("ERROR: init_d_array: could not allocate %"PRId64" bytes for array\n", num*sizeof(double));
-    return(NULL);
-  }
-  array->lentry  =  lgp_local_part(double, array->entry);
+  //array->entry   = lgp_all_alloc(num + THREADS, sizeof(double));
+  array->entry   = NULL;
+  //array->lentry  =  lgp_local_part(double, array->entry);
+  array->lentry  =  (double *)malloc(array->lnum*sizeof(double));
 
   return(array);
 }
@@ -1735,8 +1730,7 @@ int64_t replace_d_array(d_array_t * D, d_array_t * S)
  */
 void clear_d_array(d_array_t * A)
 {
-  lgp_all_free(A->entry);
+  //lgp_all_free(A->entry);
+  free(A->lentry);
 }
-
-#endif
 
