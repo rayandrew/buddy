@@ -3,7 +3,7 @@
 #include <request.h>
 #include "util_mpi.h"
 
-const size_t MAXLEN = 1*1024*1024;
+const size_t MAXLEN = 4*1024*1024;
 
 enum {
   ID_SEND,
@@ -27,6 +27,18 @@ void wait_for(uint64_t id, size_t size)
 
 int main(int argc, char **argv)
 {
+
+  if (argc != 2){
+    std::cerr << "Usage: " << argv[0] << " <max_message_size>\n";
+    return 1;
+  }
+
+  const size_t messageSize = std::stoul(argv[1]);
+  if (messageSize > MAXLEN - sizeof(buddy::request_head)) {
+    std::cerr << "max_message_size must be <= " << MAXLEN - sizeof(buddy::request_head) << std::endl;
+    return 1;
+  }
+
   CHECK_MPI(MPI_Init(&argc, &argv));
 
   int rank, size;
@@ -40,25 +52,32 @@ int main(int argc, char **argv)
   buddy_buf *send_buf = buddy_alloc(MAXLEN);
   buddy_buf *recv_buf = buddy_alloc(MAXLEN);
 
-  buddy::request_head head = {.size = 1, .dst = !rank};
+  buddy::request_head head = {.size = messageSize, .dst = !rank};
   memcpy(send_buf->addr, &head, sizeof(head));
-  ((char *)send_buf->addr)[sizeof(head)] = 0xff;
+  
+  for (size_t i = 0; i < messageSize; i++)
+    ((char *)send_buf->addr)[sizeof(head)+i] = 0xff;
 
   const int niter = 10000;
   double time[niter];
+
+  if(rank == 0){
+    std::cout << "Test buddy latency with message size " << messageSize << " bytes" << std::endl;
+    std::cout << "min\tmax\tmedian\tmean\tp99" << std::endl;
+  }
 
   for (int i = 0; i < niter; i++) {
     buddy_recv(recv_buf, MAXLEN, 0, ID_RECV);
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) {
       double t0 = MPI_Wtime();
-      buddy_send(send_buf, sizeof(head)+1, 0, ID_SEND);
-      wait_for(ID_RECV, sizeof(head)+1);
+      buddy_send(send_buf, sizeof(head)+messageSize, 0, ID_SEND);
+      wait_for(ID_RECV, sizeof(head)+messageSize);
       double t1 = MPI_Wtime();
       time[i] = (t1-t0)/2;
     } else {
-      wait_for(ID_RECV, sizeof(head)+1);
-      buddy_send(send_buf, sizeof(head)+1, 0, ID_SEND);
+      wait_for(ID_RECV, sizeof(head)+messageSize);
+      buddy_send(send_buf, sizeof(head)+messageSize, 0, ID_SEND);
       wait_for(ID_SEND, 0);
     }
   }
