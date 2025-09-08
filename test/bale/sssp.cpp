@@ -38,7 +38,7 @@ static double *gather_tent(d_array_t *tent)
   if (!MYTHREAD) {
     for (int li = 0; li < tent->lnum; li++)
       for (int t = 0; t < THREADS; t++)
-        dist[li*tent->lnum + t] = distT[li + t*THREADS];
+        dist[li*THREADS + t] = distT[li + t*tent->lnum];
   }
 
   return dist;
