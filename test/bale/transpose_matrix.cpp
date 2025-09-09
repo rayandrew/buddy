@@ -87,11 +87,10 @@ int main(int argc, char * argv[])
   if(args.std.dump_files) write_matrix_mm(inmat, "transpose_inmat");
   char model_str[32];
   int64_t error = 0;
-#if 0
   sparsemat_t * outmat;
   int write_out = 0;
   double t1;
-  int64_t use_model;
+#if 0
   minavgmaxD_t stat[1];
   for( use_model=1L; use_model < 32; use_model *=2 ) {
     t1 = wall_seconds();
@@ -117,18 +116,25 @@ int main(int argc, char * argv[])
     case 0:
       continue;
     }
+#endif
+
+    t1 = wall_seconds();
+    outmat = transpose_matrix_buddy(inmat);
+    sprintf(model_str, "Buddy");
     t1 = wall_seconds() - t1;
-    lgp_min_avg_max_d( stat, t1, THREADS );
+    //lgp_min_avg_max_d( stat, t1, THREADS );
 
-
-    bale_app_write_time(&args.std, model_str, stat->avg);
+    //bale_app_write_time(&args.std, model_str, stat->avg);
+    bale_app_write_time(&args.std, model_str, t1);
     
+#if 0
     /* correctness check */
     sparsemat_t * outmatT = transpose_matrix(outmat);
     if(compare_matrix(outmatT, inmat)){
       T0_fprintf(stderr,"ERROR: transpose of transpose does not match!\n");
       error = 1;
     }
+#endif
     
     if((write_out == 0) && (error == 0)){
       if(args.std.dump_files) write_matrix_mm(outmat, "transpose_outmat");
@@ -139,12 +145,8 @@ int main(int argc, char * argv[])
     
     //clear_matrix(outmatT);    
     //clear_matrix(outmat);    
-  }
+  //}
   
-#endif
-  transpose_matrix_buddy(inmat);
-  sprintf(model_str, "Buddy");
-
   //clear_matrix(inmat);
   lgp_barrier();
   bale_app_finish(&args.std);

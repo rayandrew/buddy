@@ -189,11 +189,10 @@ sparsemat_t * transpose_matrix_buddy(sparsemat_t * A) {
   lgp_barrier();
 
   int weighted = (A->value != NULL);
-  //convey_t* cnv_cnt = convey_new(SIZE_MAX, 0, NULL, convey_opt_SCATTER);
-  printf("WARNING: TO CONVERT convey_opt_SCATTER TO BUDDY");
   convey_t* cnv_cnt = convey_new(SIZE_MAX, 0, NULL, 0);
   convey_begin(cnv_cnt, sizeof(int64_t), 0);
 
+  // Count elements in each column
   lnnz = i = 0;
   while(convey_advance(cnv_cnt, (i == A->lnnz))){
     for( ;i < A->lnnz; i++){
@@ -207,7 +206,8 @@ sparsemat_t * transpose_matrix_buddy(sparsemat_t * A) {
       lnnz++;
     }
   }
-  convey_free(cnv_cnt);
+  //convey_free(cnv_cnt);
+  convey_reset(cnv_cnt);
 
   [[maybe_unused]] int64_t sum = lgp_reduce_add_l(lnnz);
   assert( A->nnz == sum ); 
@@ -228,8 +228,7 @@ sparsemat_t * transpose_matrix_buddy(sparsemat_t * A) {
 
   
   //convey_t* cnv_rd = convey_new(SIZE_MAX, 0, NULL, convey_opt_SCATTER);
-  printf("WARNING: TO CONVERT convey_opt_SCATTER TO BUDDY");
-  convey_t* cnv_rd = convey_new(SIZE_MAX, 0, NULL, 0);
+  convey_t* cnv_rd = cnv_cnt;
   if(weighted)
     convey_begin(cnv_rd, sizeof(w_edge_t), 0);
   else
