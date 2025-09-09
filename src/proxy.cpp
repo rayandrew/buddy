@@ -85,9 +85,8 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   last_thread_progress = new double[num_threads];
 
   for (int tid = 0; tid < num_threads; tid++) {
-    // TODO: allow different d2d buffer size
     new (&d2h_send[tid]) SendBufs(num_clients, config.d2h_size);
-    new (&d2d_send[tid]) SendBufs(num_remotes, config.h2d_size);
+    new (&d2d_send[tid]) SendBufs(num_remotes, config.d2d_size);
   }
 
   size_t total_size_h2d = config.h2d_size * h2d_depth;

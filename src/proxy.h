@@ -13,7 +13,7 @@ struct ProxyConfig {
   unsigned trace = 0;
   unsigned h2d_size = 0;
   unsigned d2h_size = 0;
-  unsigned d2d_size = 64*1024*1024;
+  unsigned d2d_size = 4*1024*1024;
   double timeout = 10.0;
   double quiet_time = 1e-3;
 };
