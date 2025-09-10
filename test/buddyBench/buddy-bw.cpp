@@ -96,7 +96,7 @@ auto bandwidthTestSender(const int pktNum, std::vector<buddy_buf*>& sendBuf, std
     int n = buddy_poll(ids, sizes, windowSize);
 
     for (int j = 0; j < n; j++) {
-      if(ids[j] < windowSize) {
+      if(ids[j] < (uint64_t)windowSize) {
         if (sentRegisterPktNum < pktNum) {
           const int pktSendThisTime = (pktNum-sentRegisterPktNum) >= aggregation ? aggregation : (pktNum-sentRegisterPktNum);
           buddy_send(sendBuf[ids[j]], pktSendThisTime * pktSize, 0, ids[j]); // reuse the buffer
@@ -134,7 +134,7 @@ int bandwidthTestReceiver(const int pktNum, std::vector<buddy_buf*>& sendBuf, st
     int n = buddy_poll(ids, sizes, windowSize);
 
     for (int j = 0; j < n; j++) {
-      if (ids[j] < windowSize) {
+      if (ids[j] < (uint64_t)windowSize) {
         CHECK(sizes[j] % pktSize == 0);
         recvPktCount += sizes[j] / pktSize;
       } else {

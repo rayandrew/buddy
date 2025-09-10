@@ -52,7 +52,7 @@ int main(int argc, char **argv)
   buddy_buf *send_buf = buddy_alloc(MAXLEN);
   buddy_buf *recv_buf = buddy_alloc(MAXLEN);
 
-  buddy::request_head head = {.size = messageSize, .dst = !rank};
+  buddy::request_head head = {.size = (uint32_t)messageSize, .dst = !rank};
   memcpy(send_buf->addr, &head, sizeof(head));
   
   for (size_t i = 0; i < messageSize; i++)

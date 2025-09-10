@@ -11,10 +11,10 @@ target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)
 
 add_subdirectory(bale)
 
-add_executable(buddy-lat buddy-lat.cpp)
+add_executable(buddy-lat buddyBench/buddy-lat.cpp)
 target_link_libraries(buddy-lat PRIVATE buddy)
 
-add_executable(buddy-bw buddy-bw.cpp)
+add_executable(buddy-bw buddyBench/buddy-bw.cpp)
 target_link_libraries(buddy-bw PRIVATE buddy)
 
 add_executable(seq seq.cpp)
