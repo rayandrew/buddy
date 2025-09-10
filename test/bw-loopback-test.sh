@@ -1,22 +1,22 @@
 #!/bin/bash
 set -euo pipefail
 
-# -------- 参数矩阵 --------
+# -------- Parameter matrix --------
 ranks=(2 4 8 16)
 sizes=(8 16 32 64 128 256)                 # payloadSize
 windowSizes=(4 8 16 32 64 128 256)
 aggregations=(1 4 16 64 128 256)
 
-# -------- 运行环境 --------
+# -------- Runtime environment --------
 numaNode=0
 logdir="logs/bw-loopback"
 mkdir -p "$logdir"
 
-# 你的二进制/路径（按需修改）
+# Your binaries/paths (modify if needed)
 PROXY_BIN="/mnt/nfs/andonghu/project/buddy-bf/build/src/buddy-proxy"
-BW_BIN="./buddy-bw"     # 新版程序：argv = <payloadSize> <windowSize> <aggregation>
+BW_BIN="./buddy-bw"     # new version: argv = <payloadSize> <windowSize> <aggregation>
 
-# -------- 清理 & 工具 --------
+# -------- Cleanup & utilities --------
 cleanup() {
   if [[ -n "${proxy_pid:-}" ]] && kill -0 "$proxy_pid" 2>/dev/null; then
     echo "Cleaning up proxy (pid=$proxy_pid) ..."
@@ -28,12 +28,12 @@ trap cleanup EXIT INT TERM
 
 timestamp() { date +"%Y%m%d-%H%M%S"; }
 
-# -------- 主循环 --------
+# -------- Main loop --------
 for r in "${ranks[@]}"; do
   echo "===> Running with ranks = $r ..."
   ts=$(timestamp)
 
-  # 每个 rank 数量生成一对日志文件
+  # Generate a pair of log files for each rank count
   proxy_log="${logdir}/proxy_r${r}_${ts}.log"
   bw_log="${logdir}/bw_r${r}_${ts}.log"
 
@@ -58,21 +58,21 @@ for r in "${ranks[@]}"; do
           echo "----- [$(date +'%F %T')] START size=${s} window=${w} agg=${a} -----"
         } | tee -a "$proxy_log" >>"$bw_log"
 
-        # 启动 proxy（后台），输出追加到 proxy_log
+        # Start proxy (background), output appended to proxy_log
         echo "[proxy] start for r=${r}, size=${s}, window=${w}, agg=${a}" >>"$proxy_log"
         mpirun --tag-output -np 1 -H bf01 "$PROXY_BIN" >>"$proxy_log" 2>&1 &
         proxy_pid=$!
 
-        # 等待 proxy ready（按需调整）
+        # Wait until proxy is ready (adjust if needed)
         sleep 1
 
-        # 运行带宽测试，NUMA 绑定
+        # Run bandwidth test with NUMA binding
         echo "[bw] run np=${r}, size=${s}, window=${w}, agg=${a}, numa=${numaNode}" >>"$bw_log"
         mpirun --tag-output -np "$r" \
           numactl -N "$numaNode" -m "$numaNode" \
           "$BW_BIN" "$s" "$w" "$a" >>"$bw_log" 2>&1
 
-        # 等待 proxy 退出（若仍在）
+        # Wait for proxy to exit (if still running)
         if kill -0 "${proxy_pid:-}" 2>/dev/null; then
           wait "$proxy_pid" || true
         fi
