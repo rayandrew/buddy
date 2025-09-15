@@ -17,6 +17,9 @@ target_link_libraries(buddy-lat PRIVATE buddy)
 add_executable(buddy-bw buddyBench/buddy-bw.cpp)
 target_link_libraries(buddy-bw PRIVATE buddy)
 
+add_executable(buddy-bw-OoO buddyBench/buddy-bw-OoO.cpp)
+target_link_libraries(buddy-bw-OoO PRIVATE buddy)
+
 add_executable(seq seq.cpp)
 target_link_libraries(seq PRIVATE buddy)
 
