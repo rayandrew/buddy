@@ -2,19 +2,22 @@
 set -euo pipefail
 
 # -------- Parameter matrix (message size in Bytes) --------
-messageSizes=(8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 65536 131072 262144)
+messageSizes=(2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 65536 131072 262144 524288 1048576)
 
 
 # -------- Runtime environment --------
 numaNode=0
-logdir="logs/lat-loopback"
+PROXY_OMP_THREADS=1
+
+logdir="logs/lat-loopback-omp${PROXY_OMP_THREADS}"
 mkdir -p "$logdir"
 
-PROXY_BIN="/mnt/nfs/andonghu/project/buddy-bf/build/src/buddy-proxy"
+PROXY_BIN="/mnt/nfs/andonghu/project/buddy/buildBF/src/buddy-proxy"
 LAT_BIN="./buddy-lat"      # Usage: buddy-lat <max_message_size>
 
 # loopback: proxy runs on bf01 (1 process), latency test runs locally with 2 processes
 PROXY_HOST="bf01"
+
 
 # -------- Cleanup & utilities --------
 cleanup() {
@@ -41,6 +44,7 @@ lat_log="${logdir}/lat_r${r}_${ts}.log"
   echo "== MATRIX:"
   echo "   messageSizes=${messageSizes[*]}"
   echo "== PROXY: ${PROXY_HOST}"
+  echo "== PROXY OMP THREADS: ${PROXY_OMP_THREADS}"
   echo "======================================================="
 } | tee -a "$proxy_log" >>"$lat_log"
 
@@ -55,7 +59,7 @@ for m in "${messageSizes[@]}"; do
   # Start proxy (single machine)
   echo "[proxy] start for msg=${m}" >>"$proxy_log"
   mpirun --tag-output -np 1 -H "${PROXY_HOST}" \
-    "$PROXY_BIN" >>"$proxy_log" 2>&1 &
+    env OMP_NUM_THREADS="$PROXY_OMP_THREADS" "$PROXY_BIN" >>"$proxy_log" 2>&1 &
   proxy_pid=$!
 
   # Wait until proxy is ready (adjust if needed)

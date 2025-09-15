@@ -4,16 +4,19 @@ set -euo pipefail
 # -------- Parameter matrix --------
 ranks=(2 4 8 16)
 sizes=(8 16 32 64 128 256)                 # payloadSize
-windowSizes=(4 8 16 32 64 128 256)
-aggregations=(1 4 16 64 128 256)
+windowSizes=(128)
+aggregations=(16 64 256)
 
 # -------- Runtime environment --------
 numaNode=0
-logdir="logs/bw-loopback"
+PROXY_OMP_THREADS=1
+
+logdir="logs/bw-loopback-omp${PROXY_OMP_THREADS}"
 mkdir -p "$logdir"
 
+
 # Your binaries/paths (modify if needed)
-PROXY_BIN="/mnt/nfs/andonghu/project/buddy-bf/build/src/buddy-proxy"
+PROXY_BIN="/mnt/nfs/andonghu/project/buddy/buildBF/src/buddy-proxy"
 BW_BIN="./buddy-bw"     # new version: argv = <payloadSize> <windowSize> <aggregation>
 
 # -------- Cleanup & utilities --------
@@ -41,6 +44,7 @@ for r in "${ranks[@]}"; do
     echo "======================================================="
     echo "== RANK $r RUN @ ${ts}"
     echo "== Host: $(hostname)  NUMA: ${numaNode}"
+    echo "== PROXY OMP THREADS: ${PROXY_OMP_THREADS}"
     echo "== MATRIX:"
     echo "   sizes=${sizes[*]}"
     echo "   windowSizes=${windowSizes[*]}"
@@ -60,7 +64,7 @@ for r in "${ranks[@]}"; do
 
         # Start proxy (background), output appended to proxy_log
         echo "[proxy] start for r=${r}, size=${s}, window=${w}, agg=${a}" >>"$proxy_log"
-        mpirun --tag-output -np 1 -H bf01 "$PROXY_BIN" >>"$proxy_log" 2>&1 &
+        mpirun --tag-output -np 1 -H bf01 env OMP_NUM_THREADS="$PROXY_OMP_THREADS" "$PROXY_BIN" >>"$proxy_log" 2>&1 &
         proxy_pid=$!
 
         # Wait until proxy is ready (adjust if needed)

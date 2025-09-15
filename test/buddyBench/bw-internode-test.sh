@@ -4,21 +4,24 @@ set -euo pipefail
 # -------- Parameter matrix --------
 ranks=(2 4 8 16 32)
 sizes=(8 16 32 64 128 256)                 # payloadSize
-windowSizes=(4 8 16 32 64 128 256)
-aggregations=(1 4 16 64 128 256)
+windowSizes=(128)
+aggregations=(16 64 256)
 
 # -------- Runtime environment & host mapping --------
 numaNode=0
-logdir="logs/bw-internode"
+PROXY_OMP_THREADS=8
+
+logdir="logs/bw-internode-omp${PROXY_OMP_THREADS}"
 mkdir -p "$logdir"
 
-PROXY_BIN="/mnt/nfs/andonghu/project/buddy-bf/build/src/buddy-proxy"
+PROXY_BIN="/mnt/nfs/andonghu/project/buddy/buildBF/src/buddy-proxy"
 BW_BIN="./buddy-bw"     # argv = <payloadSize> <windowSize> <aggregation>
 
 # Proxy (DPU) and Compute (Host) machines
 PROXY_HOSTS="bf01,bf02"
 BW_HOST1="intel01"
 BW_HOST2="intel02"
+
 
 # -------- Cleanup & utilities --------
 cleanup() {
@@ -39,7 +42,7 @@ for r in "${ranks[@]}"; do
     continue
   fi
 
-  echo "===> Running with ranks = $r ..."
+  echo "===> Running with ranks = $r, proxy omp threads = $PROXY_OMP_THREADS ..."
   ts=$(timestamp)
 
   proxy_log="${logdir}/proxy_r${r}_${ts}.log"
@@ -54,6 +57,7 @@ for r in "${ranks[@]}"; do
     echo "   windowSizes=${windowSizes[*]}"
     echo "   aggregations=${aggregations[*]}"
     echo "== PROXY: ${PROXY_HOSTS}"
+    echo "== PROXY OMP THREADS: ${PROXY_OMP_THREADS}"
     echo "== BW HOSTS: ${BW_HOST1}, ${BW_HOST2}"
     echo "======================================================="
   } | tee -a "$proxy_log" >>"$bw_log"
@@ -73,7 +77,7 @@ for r in "${ranks[@]}"; do
         # Start proxy (on both machines)
         echo "[proxy] start for r=${r}, size=${s}, window=${w}, agg=${a}" >>"$proxy_log"
         mpirun --tag-output -np 2 -H "${PROXY_HOSTS}" \
-          "$PROXY_BIN" >>"$proxy_log" 2>&1 &
+          env OMP_NUM_THREADS="$PROXY_OMP_THREADS" "$PROXY_BIN" >>"$proxy_log" 2>&1 &
         proxy_pid=$!
 
         # Wait until proxy is ready (adjust if needed)
