@@ -14,7 +14,7 @@ RETRY=3
 numaNode=0
 
 PROXY_BIN="/mnt/nfs/andonghu/project/buddy/buildBF/src/buddy-proxy"
-BW_BIN="./buddy-bw"     # argv = <payloadSize> <windowSize> <aggregation>
+BW_BIN="./buddy-bw-OoO"     # argv = <payloadSize> <windowSize> <aggregation>
 
 # Proxy (DPU) and Compute (Host) machines
 PROXY_HOSTS="bf01,bf02"
@@ -38,7 +38,7 @@ timestamp() { date +"%Y%m%d-%H%M%S"; }
 
 for PROXY_OMP_THREADS in "${proxyOMPthreads[@]}"; do
 
-  logdir="logs/bw-internode-omp${PROXY_OMP_THREADS}"
+  logdir="logs/bw-OoO-internode-omp${PROXY_OMP_THREADS}"
   mkdir -p "$logdir"
 
   for r in "${ranks[@]}"; do

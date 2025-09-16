@@ -58,7 +58,7 @@ for m in "${messageSizes[@]}"; do
 
   # Start proxy (single machine)
   echo "[proxy] start for msg=${m}" >>"$proxy_log"
-  mpirun --tag-output -np 1 -H "${PROXY_HOST}" \
+  mpirun --tag-output -np 1 -H "${PROXY_HOST}" --map-by  "ppr:1:node:pe=${PROXY_OMP_THREADS}" --bind-to core \
     env OMP_NUM_THREADS="$PROXY_OMP_THREADS" "$PROXY_BIN" >>"$proxy_log" 2>&1 &
   proxy_pid=$!
 
