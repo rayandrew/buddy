@@ -24,6 +24,8 @@ bool ReqBufRead::peek(request_head **out_head, char **out_data)
   request_head *pos_head = reinterpret_cast<request_head*>(buf+pos);
   char *data = reinterpret_cast<char*>(pos_head+1);
 
+  assert(pos + pos_head->size <= len);
+
   *out_head = pos_head;
   *out_data = data;
 
@@ -52,8 +54,6 @@ bool ReqBufRead::unpull()
 
 char *ReqBufWrite::append_head(request_head head)
 {
-  assert(sizeof(head) + head.size <= len);
-
   if (!space_for(head.size))
     return NULL;
 
