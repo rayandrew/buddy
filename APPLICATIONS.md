@@ -46,4 +46,7 @@ Parameters: check the `Examples/CTS2_Benchmark/CTS2_scaling.sh` script. I added 
 
 Example with 2 ranks: `mpirun -np 2 src/qs -i Examples/CTS2_Benchmark/CTS2.inp  -X 32  -Y 16  -Z 16  -x 32  -y 16  -z 16  -I 2  -J 1  -K 1  -n 81920`
 
-Example with 32 ranks: `BUDDY_SENDBUF=10 BUDDY_RECVBUF=10 mpirun -np 32 src/qs -i Examples/CTS2_Benchmark/CTS2-N5.inp -X 64  -Y 64  -Z 32  -x 64  -y 64  -z 32  -I 4  -J 4  -K 2  -n 1310720`
+Example with 32 ranks (short run): `BUDDY_SENDBUF=10 BUDDY_RECVBUF=20 mpirun -np 32 src/qs -i Examples/CTS2_Benchmark/CTS2-N5.inp -X 64  -Y 64  -Z 32  -x 64  -y 64  -z 32  -I 4  -J 4  -K 2  -n 1310720`
+
+Example with 32 ranks (full run): `BUDDY_SENDBUF=10 BUDDY_RECVBUF=20 mpirun -np 32 src/qs -i Examples/CTS2_Benchmark/CTS2.inp -X 64  -Y 64  -Z 32  -x 64  -y 64  -z 32  -I 4  -J 4  -K 2  -n 1310720`
+
