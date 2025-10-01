@@ -22,6 +22,8 @@
 #include "compat.h"
 #include <iostream>
 
+#include "profile.h"
+
 /*! \brief same as the others */
 typedef struct pkg_tri_t{
   int64_t w;    //!< w
@@ -73,6 +75,8 @@ double triangle_buddy_push(int64_t *count, int64_t *sr, sparsemat_t * L, sparsem
   convey_t * conv = convey_new(SIZE_MAX, 0, NULL, 0);
   if(conv == NULL){return(-1);}
   if(convey_begin( conv, sizeof(pkg_tri_t), 0 ) != convey_OK){return(-1);}
+
+  profile_start();
 
   int64_t cnt = 0;
   int64_t numpushed = 0;
@@ -136,6 +140,9 @@ double triangle_buddy_push(int64_t *count, int64_t *sr, sparsemat_t * L, sparsem
   //minavgmaxD_t stat[1];
   t1 = MPI_Wtime() - t1;
   //lgp_min_avg_max_d( stat, t1, THREADS );
+
+  profile_stop();
+
   double sum;
   CHECK_MPI(MPI_Allreduce(&t1, &sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD));
 

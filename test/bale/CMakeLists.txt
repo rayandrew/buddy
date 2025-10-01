@@ -1,5 +1,5 @@
 add_library(common INTERFACE)
-target_link_libraries(common INTERFACE buddy)
+target_link_libraries(common INTERFACE buddy hpctoolkit)
 target_include_directories(common INTERFACE .)
 target_sources(common INTERFACE std_options.cpp spmat_io.cpp spmat_utils.cpp buddy_convey.cpp)
 
