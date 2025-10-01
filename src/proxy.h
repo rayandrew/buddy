@@ -81,6 +81,7 @@ class SizeHistogram {
     SizeHistogram() = default;
     void record(size_t size);
     void add(const SizeHistogram& other);
+    void reduce();
     void print();
 
   private:

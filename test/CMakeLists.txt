@@ -10,7 +10,6 @@ if(HPCTOOLKIT)
     target_link_libraries(hpctoolkit INTERFACE -lhpctoolkit)
     target_compile_options(hpctoolkit INTERFACE -D HAVE_HPCTOOLKIT)
     target_link_options(hpctoolkit INTERFACE -L "${HPCTOOLKIT}/lib/hpctoolkit")
-    target_include_directories(hpctoolkit INTERFACE "${CMAKE_CURRENT_LIST_DIR}")
 endif()
 
 add_executable(histo histo.cpp)

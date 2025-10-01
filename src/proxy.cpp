@@ -3,6 +3,7 @@
 #include <omp.h>
 #include "proxy.h"
 #include "util.h"
+#include "util_mpi.h"
 #include "local_proto.h"
 #include "valgrind/memcheck.h"
 
@@ -342,6 +343,11 @@ void SizeHistogram::add(const SizeHistogram& other)
     counts[level] += other.counts[level];
 }
 
+void SizeHistogram::reduce()
+{
+  CHECK_MPI(MPI_Reduce(MPI_IN_PLACE, counts, levels, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
+}
+
 void SizeHistogram::print()
 {
   for (unsigned level = 0; level < levels; level++)
@@ -368,30 +374,39 @@ void Proxy::print_counters(int num_threads)
     in_total.bytes_remote += in_counters[tid].bytes_remote;
   }
 
-  std::cout << "--- msg counts ---" << std::endl;
-  std::cout << "count_in_local\t" << in_total.count_local << std::endl;
-  std::cout << "count_in_remote\t" << in_total.count_remote << std::endl;
-  std::cout << "count_out_local\t" << out_total.count_local << std::endl;
-  std::cout << "count_out_remote\t" << out_total.count_remote << std::endl;
-  std::cout << "------------------" << std::endl;
+  CHECK_MPI(MPI_Init(NULL, NULL));
+  int rank;
+  CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
 
-  std::cout << "--- network bytes ---" << std::endl;
-  std::cout << "bytes_in_local\t" << in_total.bytes_local << std::endl;
-  std::cout << "bytes_in_remote\t" << in_total.bytes_remote << std::endl;
-  std::cout << "bytes_out_local\t" << out_total.bytes_local << std::endl;
-  std::cout << "bytes_out_remote\t" << out_total.bytes_remote << std::endl;
-  std::cout << "---------------------" << std::endl;
+  CHECK_MPI(MPI_Reduce(MPI_IN_PLACE, &in_total, sizeof(in_total) / sizeof(uint64_t), MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
+  CHECK_MPI(MPI_Reduce(MPI_IN_PLACE, &out_total, sizeof(out_total) / sizeof(uint64_t), MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
 
-  std::cout << "--- avg msg size ---" << std::endl;
-  if (in_total.count_local)
-    std::cout << "avg_in_local\t" << in_total.bytes_local/in_total.count_local << std::endl;
-  if (in_total.count_remote)
-    std::cout << "avg_in_remote\t" << in_total.bytes_remote/in_total.count_remote << std::endl;
-  if (out_total.count_local)
-    std::cout << "avg_out_local\t" << out_total.bytes_local/out_total.count_local << std::endl;
-  if (out_total.count_remote)
-    std::cout << "avg_out_remote\t" << out_total.bytes_remote/out_total.count_remote << std::endl;
-  std::cout << "--------------------" << std::endl;
+  if (rank == 0) {
+    std::cout << "--- msg counts ---" << std::endl;
+    std::cout << "count_in_local\t" << in_total.count_local << std::endl;
+    std::cout << "count_in_remote\t" << in_total.count_remote << std::endl;
+    std::cout << "count_out_local\t" << out_total.count_local << std::endl;
+    std::cout << "count_out_remote\t" << out_total.count_remote << std::endl;
+    std::cout << "------------------" << std::endl;
+
+    std::cout << "--- network bytes ---" << std::endl;
+    std::cout << "bytes_in_local\t" << in_total.bytes_local << std::endl;
+    std::cout << "bytes_in_remote\t" << in_total.bytes_remote << std::endl;
+    std::cout << "bytes_out_local\t" << out_total.bytes_local << std::endl;
+    std::cout << "bytes_out_remote\t" << out_total.bytes_remote << std::endl;
+    std::cout << "---------------------" << std::endl;
+
+    std::cout << "--- avg msg size ---" << std::endl;
+    if (in_total.count_local)
+      std::cout << "avg_in_local\t" << in_total.bytes_local/in_total.count_local << std::endl;
+    if (in_total.count_remote)
+      std::cout << "avg_in_remote\t" << in_total.bytes_remote/in_total.count_remote << std::endl;
+    if (out_total.count_local)
+      std::cout << "avg_out_local\t" << out_total.bytes_local/out_total.count_local << std::endl;
+    if (out_total.count_remote)
+      std::cout << "avg_out_remote\t" << out_total.bytes_remote/out_total.count_remote << std::endl;
+    std::cout << "--------------------" << std::endl;
+  }
 
   SizeHistogram d2h_hist, d2d_hist;
   for (int tid = 0; tid < num_threads; tid++) {
@@ -399,13 +414,20 @@ void Proxy::print_counters(int num_threads)
     d2d_hist.add(d2d_send[tid].get_hist());
   }
 
-  std::cout << "--- local size histogram ---" << std::endl;
-  d2h_hist.print();
+  d2h_hist.reduce();
+  d2d_hist.reduce();
 
-  std::cout << "--- remote size histogram ---" << std::endl;
-  d2d_hist.print();
+  if (rank == 0) {
+    std::cout << "--- local size histogram ---" << std::endl;
+    d2h_hist.print();
 
-  tt_print("proxy breakdown");
+    std::cout << "--- remote size histogram ---" << std::endl;
+    d2d_hist.print();
+  }
+
+  tt_print_mpi("proxy breakdown");
+
+  MPI_Finalize();
 }
 
 char *Proxy::get_recv_buf(route rt)
