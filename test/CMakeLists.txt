@@ -1,12 +1,19 @@
-if (absl_FOUND)
+if(absl_FOUND)
     add_executable(ygm-trace ygm-trace.cpp)
     target_link_libraries(ygm-trace PRIVATE buddy absl::flat_hash_map)
     # Dont want to fix this now
     target_compile_options(ygm-trace PRIVATE -Wno-narrowing)
 endif()
 
+add_library(hpctoolkit INTERFACE)
+if(HPCTOOLKIT)
+    target_link_libraries(hpctoolkit INTERFACE -lhpctoolkit)
+    target_compile_options(hpctoolkit INTERFACE -D HAVE_HPCTOOLKIT)
+    target_link_options(hpctoolkit INTERFACE -L "${HPCTOOLKIT}/lib/hpctoolkit")
+endif()
+
 add_executable(histo histo.cpp)
-target_link_libraries(histo PRIVATE buddy)
+target_link_libraries(histo PRIVATE buddy hpctoolkit)
 target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)
 
 add_subdirectory(bale)
@@ -19,6 +26,7 @@ target_link_libraries(buddy-bw PRIVATE buddy)
 
 add_executable(buddy-bw-OoO buddyBench/buddy-bw-OoO.cpp)
 target_link_libraries(buddy-bw-OoO PRIVATE buddy)
+target_compile_options(buddy-bw-OoO PRIVATE -Wno-error=sign-compare)
 
 add_executable(seq seq.cpp)
 target_link_libraries(seq PRIVATE buddy)

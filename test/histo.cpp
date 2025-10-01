@@ -27,6 +27,7 @@ extern int xmpi_init(int argc, char* argv[]);
 #include <buddy.h>
 #include "request.h"
 #include "util_mpi.h"
+#include "profile.h"
 
 const size_t MAXLEN = 1*1024*1024;
 
@@ -125,7 +126,9 @@ main(int argc, char* argv[])
     uint64_t recv_count = 0;
 
     MPI_Barrier(MPI_COMM_WORLD);
+    profile_start();
     double t0 = MPI_Wtime();
+
     /*** START OF CONVEYOR LOOP ***/
     long n = 0;
 
@@ -257,6 +260,8 @@ end:
     /*** END OF CONVEYOR LOOP ***/
     MPI_Barrier(MPI_COMM_WORLD);
     double t1 = MPI_Wtime();
+    profile_stop();
+
     if (MY_PROC == 0) {
       printf("time: %lf\n", t1-t0);
     }
