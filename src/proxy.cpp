@@ -345,7 +345,11 @@ void SizeHistogram::add(const SizeHistogram& other)
 
 void SizeHistogram::reduce()
 {
-  CHECK_MPI(MPI_Reduce(MPI_IN_PLACE, counts, levels, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
+  uint64_t send[levels];
+  for (unsigned level = 0; level < levels; level++)
+    send[level] = counts[level];
+
+  CHECK_MPI(MPI_Reduce(send, counts, levels, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
 }
 
 void SizeHistogram::print()
@@ -374,12 +378,12 @@ void Proxy::print_counters(int num_threads)
     in_total.bytes_remote += in_counters[tid].bytes_remote;
   }
 
-  CHECK_MPI(MPI_Init(NULL, NULL));
   int rank;
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
 
-  CHECK_MPI(MPI_Reduce(MPI_IN_PLACE, &in_total, sizeof(in_total) / sizeof(uint64_t), MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
-  CHECK_MPI(MPI_Reduce(MPI_IN_PLACE, &out_total, sizeof(out_total) / sizeof(uint64_t), MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
+  rdma_counters in_send = in_total, out_send = out_total;
+  CHECK_MPI(MPI_Reduce(&in_send, &in_total, sizeof(in_total) / sizeof(uint64_t), MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
+  CHECK_MPI(MPI_Reduce(&out_send, &out_total, sizeof(out_total) / sizeof(uint64_t), MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
 
   if (rank == 0) {
     std::cout << "--- msg counts ---" << std::endl;
@@ -426,8 +430,6 @@ void Proxy::print_counters(int num_threads)
   }
 
   tt_print_mpi("proxy breakdown");
-
-  MPI_Finalize();
 }
 
 char *Proxy::get_recv_buf(route rt)

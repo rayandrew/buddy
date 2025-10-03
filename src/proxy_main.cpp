@@ -6,6 +6,7 @@
 #include "sockets.h"
 #include "local_proto.h"
 #include "util.h"
+#include "util_mpi.h"
 #include "rdma.h"
 #include "proxy.h"
 
@@ -15,6 +16,8 @@
 
 int main(int argc, char **argv)
 {
+  CHECK_MPI(MPI_Init(NULL, NULL));
+
   int lsock = buddy::tcp_listen(buddy::LOCAL_PORT);
   int remote_lsock = buddy::tcp_listen(buddy::REMOTE_PORT);
 
@@ -33,7 +36,12 @@ int main(int argc, char **argv)
   // DPU address for each rank, sent by local rank 0
   uint32_t *address_table = NULL;
 
-  std::cout << "listening for connections..." << std::endl;
+  int rank;
+  CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (!rank)
+    std::cout << "listening for connections..." << std::endl;
 
   do {
     int conn = accept(lsock, NULL, NULL);
@@ -210,4 +218,6 @@ int main(int argc, char **argv)
   CHECK(!ibv_destroy_srq(cqs.remote_srq));
 
   delete[] routing_table;
+
+  MPI_Finalize();
 }
