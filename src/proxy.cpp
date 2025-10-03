@@ -316,6 +316,8 @@ void Proxy::rdma_loop()
   }
 
   std::cout << "max_blocked_thread\t" << max_blocked << std::endl;
+  MPI_Barrier(MPI_COMM_WORLD);
+
   print_counters(num_threads);
 }
 
