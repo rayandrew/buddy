@@ -228,10 +228,10 @@ class Proxy {
     void poll_send_queue();
 
     bool route_reqs(ReqBufRead& reader);
-    void flush_all();
-    void flush(route r);
-    void flush_local(unsigned idx);
-    void flush_remote(unsigned idx);
+    bool flush_all();
+    bool flush(route r);
+    bool flush_local(unsigned idx);
+    bool flush_remote(unsigned idx);
 
     void print_counters(int num_threads);
 };

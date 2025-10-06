@@ -252,9 +252,10 @@ void Proxy::rdma_loop()
   quit_counter = 0;
 
   int num_threads = 0;
-  size_t max_blocked = 0;
+  uint64_t max_blocked = 0;
+  uint64_t quiet_flushes = 0;
 
-#pragma omp parallel reduction(max:max_blocked)
+#pragma omp parallel reduction(max:max_blocked) reduction(+:quiet_flushes)
   {
     int tid = omp_get_thread_num();
     last_thread_progress[tid] = omp_get_wtime();
@@ -283,7 +284,10 @@ void Proxy::rdma_loop()
         double now = omp_get_wtime();
         if (now > last_recv + config.quiet_time) {
           last_recv = now;
-          flush_all();
+          if (flush_all()) {
+            TRACE(1, "quiet time elapsed, all flushed!");
+            quiet_flushes++;
+          }
         }
 
         // Thread is idle, no work to do
@@ -315,8 +319,18 @@ void Proxy::rdma_loop()
     toc(TT_RDMALOOP);
   }
 
-  std::cout << "max_blocked_thread\t" << max_blocked << std::endl;
-  MPI_Barrier(MPI_COMM_WORLD);
+  int rank;
+  CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+
+  uint64_t max_blocked_global;
+  CHECK_MPI(MPI_Reduce(&max_blocked, &max_blocked_global, 1, MPI_UINT64_T, MPI_MAX, 0, MPI_COMM_WORLD));
+  if (!rank)
+    std::cout << "max_blocked_thread\t" << max_blocked_global << std::endl;
+
+  uint64_t quiet_flushes_global;
+  CHECK_MPI(MPI_Reduce(&quiet_flushes, &quiet_flushes_global, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
+  if (!rank)
+    std::cout << "quiet_flushes\t" << quiet_flushes_global << std::endl;
 
   print_counters(num_threads);
 }
@@ -545,20 +559,20 @@ bool Proxy::route_reqs(ReqBufRead &reader)
   return complete;
 }
 
-void Proxy::flush(route r)
+bool Proxy::flush(route r)
 {
   if (r.remote)
-    flush_remote(r.idx);
+    return flush_remote(r.idx);
   else
-    flush_local(r.idx);
+    return flush_local(r.idx);
 }
 
-void Proxy::flush_remote(unsigned idx)
+bool Proxy::flush_remote(unsigned idx)
 {
   int tid = omp_get_thread_num();
 
   if (d2d_send[tid].reqs(idx).empty())
-    return;
+    return false;
 
   tic(TT_REMFLUSH);
 
@@ -573,14 +587,16 @@ void Proxy::flush_remote(unsigned idx)
       size, d2d_send[tid].offset(idx), id.as_int());
 
   toc(TT_REMFLUSH);
+
+  return true;
 }
 
-void Proxy::flush_local(unsigned idx)
+bool Proxy::flush_local(unsigned idx)
 {
   int tid = omp_get_thread_num();
 
   if (d2h_send[tid].reqs(idx).empty())
-    return;
+    return false;
 
   tic(TT_LOCFLUSH);
 
@@ -595,19 +611,26 @@ void Proxy::flush_local(unsigned idx)
       d2h_send[tid].offset(idx), id.as_int());
 
   toc(TT_LOCFLUSH);
+
+  return true;
 }
 
-void Proxy::flush_all()
+bool Proxy::flush_all()
 {
   int tid = omp_get_thread_num();
+  bool flushed = false;
 
   for (unsigned i = 0; i < num_clients; i++)
     if (d2h_send[tid].ready_for_send(i))
-      flush_local(i);
+      if (flush_local(i))
+        flushed = true;
 
   for (unsigned i = 0; i < num_remotes; i++)
     if (d2d_send[tid].ready_for_send(i))
-      flush_remote(i);
+      if (flush_remote(i))
+        flushed = true;
+
+  return flushed;
 }
 
 SendBufs::SendBufs(unsigned n, unsigned size)
