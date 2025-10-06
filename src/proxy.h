@@ -13,7 +13,8 @@ struct ProxyConfig {
   unsigned trace = 0;
   unsigned h2d_size = 0;
   unsigned d2h_size = 0;
-  unsigned d2d_size = 4*1024*1024;
+  unsigned d2d_size = 32*1024;
+  unsigned d2d_depth = 32;
   double timeout = 10.0;
   double quiet_time = 1e-3;
 };
@@ -57,7 +58,8 @@ struct route {
 
 struct send_buf_id {
   route rt;
-  uint32_t tid;
+  uint16_t tid;
+  uint16_t repid;
 
   inline uint64_t as_int()
   {
@@ -97,24 +99,24 @@ class SendBufs {
 
   public:
     SendBufs() = default;
-    SendBufs(unsigned n, unsigned size);
+    SendBufs(unsigned n, unsigned m, unsigned size);
     ~SendBufs();
 
-    ReqBufWrite &reqs(unsigned i) { return reqbufs[i]; }
-    size_t offset(unsigned i) { return i*size; }
+    ReqBufWrite &reqs(unsigned i, unsigned j) { return reqbufs[idx(i, j)]; }
+    size_t offset(unsigned i, unsigned j) { return idx(i, j)*size; }
     ibv_mr *mr() { return mr_; }
 
     const SizeHistogram& get_hist() const { return size_hist; }
 
     // Called from sender thread
-    bool ready_for_send(unsigned i)
+    bool ready_for_send(unsigned i, unsigned j)
     {
-      if (is_ready[i])
+      if (is_ready[idx(i, j)])
         return true;
 
-      if (is_complete[i]) {
-        reqbufs[i].reset_pos();
-        is_ready[i] = true;
+      if (is_complete[idx(i, j)]) {
+        reqbufs[idx(i, j)].reset_pos();
+        is_ready[idx(i, j)] = true;
 
         return true;
       }
@@ -124,24 +126,24 @@ class SendBufs {
     }
 
     // Called from sender thread
-    void mark_flushing(unsigned i)
+    void mark_flushing(unsigned i, unsigned j)
     {
-      assert(is_ready[i]);
+      assert(is_ready[idx(i, j)]);
 
       flush_count++;
-      size_t size = reqbufs[i].get_pos();
+      size_t size = reqbufs[idx(i, j)].get_pos();
       total_bytes += size;
       size_hist.record(size);
 
-      is_ready[i] = false;
-      is_complete[i] = false;
+      is_ready[idx(i, j)] = false;
+      is_complete[idx(i, j)] = false;
     }
 
     // Called from poller thread
-    void mark_complete(unsigned i)
+    void mark_complete(unsigned i, unsigned j)
     {
-      assert(!is_complete[i]);
-      is_complete[i] = true;
+      assert(!is_complete[idx(i, j)]);
+      is_complete[idx(i, j)] = true;
     }
 
     void get_counts(uint64_t *count, uint64_t *bytes)
@@ -150,18 +152,38 @@ class SendBufs {
       *bytes = total_bytes;
     }
 
+    int get_ready_repid(unsigned i)
+    {
+      unsigned start = repid_ptrs[i];
+
+      for (unsigned k = 0; k < m; k++) {
+        unsigned j = (start + k) % m;
+
+        if (is_ready[idx(i, j)]) {
+          repid_ptrs[i] = j;
+          return j;
+        }
+      }
+
+      return -1;
+    }
+
   private:
     const unsigned n = 0;
+    const unsigned m = 0;
     const unsigned size = 0;
 
     ibv_mr *mr_ = NULL;
     ReqBufWrite *reqbufs = NULL;
     bool *is_ready = NULL;
     std::atomic_bool *is_complete = NULL;
+    unsigned *repid_ptrs = NULL;
 
     uint64_t flush_count = 0;
     uint64_t total_bytes = 0;
     SizeHistogram size_hist;
+
+    unsigned idx(unsigned i, unsigned j) { return j + i*m; }
 };
 
 struct proxy_cqs {
@@ -229,9 +251,9 @@ class Proxy {
 
     bool route_reqs(ReqBufRead& reader);
     bool flush_all();
-    bool flush(route r);
-    bool flush_local(unsigned idx);
-    bool flush_remote(unsigned idx);
+    bool flush(route r, unsigned repid);
+    bool flush_local(unsigned idx, unsigned repid);
+    bool flush_remote(unsigned idx, unsigned repid);
 
     void print_counters(int num_threads);
 };

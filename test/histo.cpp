@@ -29,7 +29,7 @@ extern int xmpi_init(int argc, char* argv[]);
 #include "util_mpi.h"
 #include "profile.h"
 
-const size_t MAXLEN = 1*1024*1024;
+const size_t MAXLEN = 32*1024;
 
 long xmpi_my_proc = 0;
 long xmpi_n_procs = 0;

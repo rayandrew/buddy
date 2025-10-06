@@ -86,8 +86,8 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   last_thread_progress = new double[num_threads];
 
   for (int tid = 0; tid < num_threads; tid++) {
-    new (&d2h_send[tid]) SendBufs(num_clients, config.d2h_size);
-    new (&d2d_send[tid]) SendBufs(num_remotes, config.d2d_size);
+    new (&d2h_send[tid]) SendBufs(num_clients, 1, config.d2h_size);
+    new (&d2d_send[tid]) SendBufs(num_remotes, config.d2d_depth, config.d2d_size);
   }
 
   size_t total_size_h2d = config.h2d_size * h2d_depth;
@@ -161,7 +161,7 @@ void Proxy::poll_send_queue()
     if (id.rt.remote)
       send_bufs = &d2d_send[id.tid];
 
-    send_bufs->mark_complete(id.rt.idx);
+    send_bufs->mark_complete(id.rt.idx, id.repid);
   }
 }
 
@@ -527,28 +527,30 @@ bool Proxy::route_reqs(ReqBufRead &reader)
     if (r.remote)
       send_bufs = &d2d_send[tid];
 
-    if (!send_bufs->ready_for_send(r.idx)) {
-      poll_send_queue();
-      if (!send_bufs->ready_for_send(r.idx)) {
-        complete = false;
+    int repid = send_bufs->get_ready_repid(r.idx);
+    while (repid >= 0) {
+      ReqBufWrite& req = send_bufs->reqs(r.idx, repid);
+      if (!req.append(*head, data)) {
+        flush(r, repid);
+        repid = send_bufs->get_ready_repid(r.idx);
+      } else {
+        if (r.remote)
+          TRACE(2, "route to " << head->dst << " (remote " << r.idx << ")");
+        else
+          TRACE(2, "route to " << head->dst << " (local " << r.idx << ")");
+
+        reader.advance(head);
+        progress = true;
         break;
       }
     }
 
-    ReqBufWrite& req = send_bufs->reqs(r.idx);
-    if (!req.append(*head, data)) {
-      flush(r);
+    if (repid < 0) {
+      // No free send buffers
+      poll_send_queue();
       complete = false;
       break;
     }
-
-    if (r.remote)
-      TRACE(2, "route to " << head->dst << " (remote " << r.idx << ")");
-    else
-      TRACE(2, "route to " << head->dst << " (local " << r.idx << ")");
-
-    reader.advance(head);
-    progress = true;
   }
 
   if (progress)
@@ -559,56 +561,56 @@ bool Proxy::route_reqs(ReqBufRead &reader)
   return complete;
 }
 
-bool Proxy::flush(route r)
+bool Proxy::flush(route r, unsigned repid)
 {
   if (r.remote)
-    return flush_remote(r.idx);
+    return flush_remote(r.idx, repid);
   else
-    return flush_local(r.idx);
+    return flush_local(r.idx, repid);
 }
 
-bool Proxy::flush_remote(unsigned idx)
+bool Proxy::flush_remote(unsigned idx, unsigned repid)
 {
   int tid = omp_get_thread_num();
 
-  if (d2d_send[tid].reqs(idx).empty())
+  if (d2d_send[tid].reqs(idx, repid).empty())
     return false;
 
   tic(TT_REMFLUSH);
 
-  d2d_send[tid].mark_flushing(idx);
+  d2d_send[tid].mark_flushing(idx, repid);
 
-  size_t size = d2d_send[tid].reqs(idx).get_pos();
+  size_t size = d2d_send[tid].reqs(idx, repid).get_pos();
   route rt = route::make_remote(idx);
-  send_buf_id id = {rt, (uint32_t)tid};
+  send_buf_id id = {rt, (uint16_t)tid, (uint16_t)repid};
 
   TRACE(1, "send to remote " << idx << " size " << size << " thread " << tid);
   remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send[tid].mr(),
-      size, d2d_send[tid].offset(idx), id.as_int());
+      size, d2d_send[tid].offset(idx, repid), id.as_int());
 
   toc(TT_REMFLUSH);
 
   return true;
 }
 
-bool Proxy::flush_local(unsigned idx)
+bool Proxy::flush_local(unsigned idx, unsigned repid)
 {
   int tid = omp_get_thread_num();
 
-  if (d2h_send[tid].reqs(idx).empty())
+  if (d2h_send[tid].reqs(idx, repid).empty())
     return false;
 
   tic(TT_LOCFLUSH);
 
-  d2h_send[tid].mark_flushing(idx);
+  d2h_send[tid].mark_flushing(idx, repid);
 
-  size_t size = d2h_send[tid].reqs(idx).get_pos();
+  size_t size = d2h_send[tid].reqs(idx, repid).get_pos();
   route rt = route::make_local(idx);
-  send_buf_id id = {rt, (uint32_t)tid};
+  send_buf_id id = {rt, (uint16_t)tid, (uint16_t)repid};
 
-  TRACE(1, "send to local rank " << local_idx_to_rank[idx] << " size " << size << " thread " << tid);
+  TRACE(1, "send to local rank " << local_idx_to_rank[idx] << " (idx " << idx << ")" << " size " << size << " thread " << tid);
   local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_send[tid].mr(), size,
-      d2h_send[tid].offset(idx), id.as_int());
+      d2h_send[tid].offset(idx, repid), id.as_int());
 
   toc(TT_LOCFLUSH);
 
@@ -621,38 +623,45 @@ bool Proxy::flush_all()
   bool flushed = false;
 
   for (unsigned i = 0; i < num_clients; i++)
-    if (d2h_send[tid].ready_for_send(i))
-      if (flush_local(i))
+    if (d2h_send[tid].ready_for_send(i, 0))
+      if (flush_local(i, 0))
         flushed = true;
 
   for (unsigned i = 0; i < num_remotes; i++)
-    if (d2d_send[tid].ready_for_send(i))
-      if (flush_remote(i))
-        flushed = true;
+    for (unsigned j = 0; j < config.d2d_depth; j++)
+      if (d2d_send[tid].ready_for_send(i, j))
+        if (flush_remote(i, j))
+          flushed = true;
 
   return flushed;
 }
 
-SendBufs::SendBufs(unsigned n, unsigned size)
+SendBufs::SendBufs(unsigned n, unsigned m, unsigned size)
   : n(n)
+  , m(m)
   , size(size)
 {
-  if (!n)
+  CHECK(m);
+
+  if (!n || !m)
     return;
 
-  reqbufs = new ReqBufWrite[n];
-  char *buf = new char[n*size];
-  mr_ = ibv_reg_mr(rdma::Context::get().get_pd(), buf, n*size, IBV_ACCESS_LOCAL_WRITE);
+  reqbufs = new ReqBufWrite[n*m];
+  char *buf = new char[n*m*size];
+  mr_ = ibv_reg_mr(rdma::Context::get().get_pd(), buf, n*m*size, IBV_ACCESS_LOCAL_WRITE);
   CHECK_ERRNO(mr_);
 
   for (unsigned i = 0; i < n; i++)
-    new (&reqbufs[i]) ReqBufWrite(buf + offset(i), size);
+    for (unsigned j = 0; j < m; j++)
+      new (&reqbufs[idx(i, j)]) ReqBufWrite(buf + offset(i, j), size);
 
-  is_ready = new bool[n];
-  for (unsigned i = 0; i < n; i++)
+  is_ready = new bool[n*m];
+  for (unsigned i = 0; i < n*m; i++)
     is_ready[i] = true;
 
-  is_complete = new std::atomic_bool[n];
+  is_complete = new std::atomic_bool[n*m]{};
+
+  repid_ptrs = new unsigned[n]{};
 }
 
 SendBufs::~SendBufs()
@@ -668,6 +677,8 @@ SendBufs::~SendBufs()
     CHECK(!ibv_dereg_mr(mr_));
     delete[] buf;
   }
+  if (repid_ptrs)
+    delete[] repid_ptrs;
 }
 
 } // namespace buddy::dpu

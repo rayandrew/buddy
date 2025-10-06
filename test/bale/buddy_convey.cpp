@@ -14,7 +14,7 @@ enum cstate {
   STATE_COMPLETE,
 };
 
-const size_t MAXLEN = 1*1024*1024;
+const size_t MAXLEN = 32*1024;
 
 struct convey_t {
   buddy_buf *send_buf;
