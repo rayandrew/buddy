@@ -2,3 +2,4 @@ build*/
 *.log
 *.out
 *.data
+app_results/
