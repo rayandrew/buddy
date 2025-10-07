@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+
+import argparse
+import uuid
+import pandas as pd
+import os
+import subprocess
+import re
+import time
+
+TIMEOUT_S = 60*10
+
+app_cmds = {
+    'mini_histo':   'test/histo 10000 100000 1',
+    'histo':        'test/histo 19660800 100000000 1',
+    'triangle':     'test/bale/triangle -n 1787345',
+}
+
+app_time_pat = {
+    'mini_histo':   '^time:\s+([\d\.]+)',
+    'histo':        '^time:\s+([\d\.]+)',
+    'triangle':     '^\s+Buddy:\s+([\d\.]+)',
+    'transpose':    '^\s+Buddy:\s+([\d\.]+)',
+    'sssp':         '^\s+Buddy:\s+([\d\.]+)',
+}
+
+children = []
+
+def run_trial(config, path, dry_run):
+    htk_path = os.path.join(path, 'profile')
+
+    if config['offload'] == 'none':
+        hosts = 'intel01,intel02'
+        numactl = 'numactl -N0'
+        build = 'host-rel'
+        app_pre = 'scripts/hostname_dpu.sh'
+    elif config['offload'] == 'local':
+        hosts = 'intel01,intel02'
+        numactl = 'numactl -N1'
+        build = 'host-rel'
+        app_pre = 'scripts/hostname_dpu.sh'
+    elif config['offload'] == 'dpu':
+        hosts = 'bf01,bf02'
+        numactl = ''
+        build = 'dpu-rel'
+        app_pre = ''
+    else:
+        raise Exception(f'unknown offload "{config["offload"]}"')
+
+    proxy_cmd = f'mpirun -np 2 -H {hosts} -bind-to none env OMP_NUM_THREADS={config["threads"]} {numactl} {build}/src/buddy-proxy'
+    app_cmd = f'mpirun -np 32 -H intel01:16,intel02:16 {app_pre} numactl -N0 $(which hpcrun) -o {htk_path} -ds -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME host-htk/{app_cmds[config["app"]]}'
+
+    if dry_run:
+        print(proxy_cmd)
+        print(app_cmd)
+    else:
+        proxy_log = open(os.path.join(path, 'proxy.log'), 'w')
+        app_log = open(os.path.join(path, 'app.log'), 'w')
+
+        print(proxy_cmd)
+        proxy_proc = subprocess.Popen(proxy_cmd, shell=True, stdout=proxy_log, stderr=subprocess.STDOUT)
+
+        children = [proxy_proc]
+
+        time.sleep(0.1)
+
+        print(app_cmd)
+        app_proc = subprocess.Popen(app_cmd, shell=True, stdout=app_log, stderr=subprocess.STDOUT)
+
+        children.append(app_proc)
+
+        for i in range(2):
+            pid, status = os.wait()
+            if not os.WIFEXITED(status):
+                raise Exception('child did not exit')
+            if os.WEXITSTATUS(status) != 0:
+                raise Exception('child exited with nonzero status')
+
+        children = []
+
+def collect_metrics(config, path):
+    res = {}
+
+    pat = re.compile(app_time_pat[config['app']])
+
+    app_log = open(os.path.join(path, 'app.log'), 'r')
+    for line in app_log:
+        if mat := re.search(pat, line):
+            res['time'] = mat.group(1)
+
+    # Fail if not found
+    res['time']
+
+    msg_metrics = frozenset('_'.join([a, b, c]) for a in ('count', 'bytes', 'avg') for b in ('in', 'out') for c in ('local', 'remote'))
+    other_metrics = frozenset(['max_blocked_thread', 'quiet_flushes'])
+    proxy_metrics = msg_metrics | other_metrics
+
+    for line in open(os.path.join(path, 'proxy.log'), 'r'):
+        parts = line.split()
+        if parts[0] in proxy_metrics:
+            res[parts[0]] = parts[1]
+
+    # Fail if not found
+    for metric in proxy_metrics:
+        res[metric]
+
+    return res
+
+def main():
+    p = argparse.ArgumentParser()
+
+    p.add_argument('output')
+    p.add_argument('app')
+    p.add_argument('offload')
+
+    p.add_argument('-b', '--bufs', default='1:1')
+    p.add_argument('-t', '--threads', default='8')
+
+    p.add_argument('-n', '--dry-run', action='store_true')
+    p.add_argument('-c', '--collect-only', action='store_true')
+    p.add_argument('-u', '--uid')
+
+    args = p.parse_args()
+
+    if os.system('which mpirun > /dev/null'):
+        raise Exception('Cannot find mpirun')
+
+    if os.system('which hpcrun > /dev/null'):
+        raise Exception('Cannot find hpctoolkit')
+
+    out = None
+
+    try:
+        for app in args.app.split(','):
+            for bufs in args.bufs.split(','):
+                for threads in args.threads.split(','):
+                    for offload in args.offload.split(','):
+                        if args.uid is None:
+                            uid = uuid.uuid4().hex
+                        else:
+                            uid = args.uid
+
+                        config = {
+                            'uid': uid,
+                            'app': app,
+                            'offload': offload,
+                            'bufs': bufs,
+                            'threads': threads,
+                        }
+
+                        new_run = (not args.dry_run) and (not args.collect_only)
+                        path = os.path.join('app_results', config['uid'])
+                        if new_run:
+                            os.makedirs(path)
+
+                        run_trial(config, path, not new_run)
+                        res = collect_metrics(config, path)
+
+                        trial = pd.DataFrame([config | res])
+                        print(trial)
+
+                        if not args.dry_run:
+                            if out is None:
+                                out = open(args.output, 'a')
+
+                                if out.tell() == 0:
+                                    htk_cols = ["binary", "instructions_I", "instructions_E", "LLC-loads_I", "LLC-loads_E", "LLC-load-misses_I", "LLC-load-misses_E", "CPUTIME_E", "CPUTIME_I"]
+                                    header = trial.columns.to_list() + htk_cols
+                                    print('\t'.join(header), file=out)
+
+                            trial.to_csv(out, index=False, sep='\t', header=False)
+                            out.flush()
+    finally:
+        for child in children:
+            child.kill()
+
+if __name__ == '__main__':
+    main()
