@@ -7,6 +7,7 @@ import os
 import subprocess
 import re
 import time
+import itertools
 
 TIMEOUT_S = 60*10
 
@@ -14,6 +15,8 @@ app_cmds = {
     'mini_histo':   'test/histo 10000 100000 1',
     'histo':        'test/histo 19660800 100000000 1',
     'triangle':     'test/bale/triangle -n 1787345',
+    'transpose':    'test/bale/transpose_matrix -n 1787345',
+    'sssp':         'test/bale/sssp -n 1787345',
 }
 
 app_time_pat = {
@@ -21,7 +24,7 @@ app_time_pat = {
     'histo':        '^time:\s+([\d\.]+)',
     'triangle':     '^\s+Buddy:\s+([\d\.]+)',
     'transpose':    '^\s+Buddy:\s+([\d\.]+)',
-    'sssp':         '^\s+Buddy:\s+([\d\.]+)',
+    'sssp':         '^Bellman-Ford Buddy:\s+([\d\.]+)',
 }
 
 children = []
@@ -47,7 +50,7 @@ def run_trial(config, path, dry_run):
     else:
         raise Exception(f'unknown offload "{config["offload"]}"')
 
-    proxy_cmd = f'mpirun -np 2 -H {hosts} -bind-to none env OMP_NUM_THREADS={config["threads"]} {numactl} {build}/src/buddy-proxy'
+    proxy_cmd = f'mpirun -np 2 -H {hosts} -bind-to none env OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} {numactl} {build}/src/buddy-proxy'
     app_cmd = f'mpirun -np 32 -H intel01:16,intel02:16 {app_pre} numactl -N0 $(which hpcrun) -o {htk_path} -ds -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME host-htk/{app_cmds[config["app"]]}'
 
     if dry_run:
@@ -78,6 +81,12 @@ def run_trial(config, path, dry_run):
 
         children = []
 
+        # for tool in ("hpcstruct", "hpcprof"):
+        #     log = open(os.path.join(path, f'{tool}.log'), 'w')
+        #     cmd = [tool, htk_path]
+        #     print(" ".join(cmd))
+        #     subprocess.run(cmd, check=True, stderr=subprocess.STDOUT, stdout=log)
+
 def collect_metrics(config, path):
     res = {}
 
@@ -92,7 +101,10 @@ def collect_metrics(config, path):
     res['time']
 
     msg_metrics = frozenset('_'.join([a, b, c]) for a in ('count', 'bytes', 'avg') for b in ('in', 'out') for c in ('local', 'remote'))
-    other_metrics = frozenset(['max_blocked_thread', 'quiet_flushes'])
+    other_metrics = frozenset([
+        'max_blocked_thread', 'quiet_flush_events', 'quiet_flush_bufs',
+        'h2d_size', 'd2h_size', 'd2d_size',
+    ])
     proxy_metrics = msg_metrics | other_metrics
 
     for line in open(os.path.join(path, 'proxy.log'), 'r'):
@@ -116,9 +128,13 @@ def main():
     p.add_argument('-b', '--bufs', default='1:1')
     p.add_argument('-t', '--threads', default='8')
 
+    p.add_argument('-q', '--quiet-time', type=float)
+
     p.add_argument('-n', '--dry-run', action='store_true')
     p.add_argument('-c', '--collect-only', action='store_true')
     p.add_argument('-u', '--uid')
+
+    p.add_argument('-r', '--repeat', default=1, type=int)
 
     args = p.parse_args()
 
@@ -130,49 +146,49 @@ def main():
 
     out = None
 
-    try:
-        for app in args.app.split(','):
-            for bufs in args.bufs.split(','):
-                for threads in args.threads.split(','):
-                    for offload in args.offload.split(','):
-                        if args.uid is None:
-                            uid = uuid.uuid4().hex
-                        else:
-                            uid = args.uid
+    for i in range(args.repeat):
+        try:
+            iters = itertools.product(*(arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload)))
+            for app, bufs, threads, offload in iters:
+                if args.uid is None:
+                    uid = uuid.uuid4().hex
+                else:
+                    uid = args.uid
 
-                        config = {
-                            'uid': uid,
-                            'app': app,
-                            'offload': offload,
-                            'bufs': bufs,
-                            'threads': threads,
-                        }
+                config = {
+                    'uid': uid,
+                    'app': app,
+                    'offload': offload,
+                    'bufs': bufs,
+                    'threads': threads,
+                    'quiet_time': args.quiet_time,
+                }
 
-                        new_run = (not args.dry_run) and (not args.collect_only)
-                        path = os.path.join('app_results', config['uid'])
-                        if new_run:
-                            os.makedirs(path)
+                new_run = (not args.dry_run) and (not args.collect_only)
+                path = os.path.join('app_results', config['uid'])
+                if new_run:
+                    os.makedirs(path)
 
-                        run_trial(config, path, not new_run)
-                        res = collect_metrics(config, path)
+                run_trial(config, path, not new_run)
+                res = collect_metrics(config, path)
 
-                        trial = pd.DataFrame([config | res])
-                        print(trial)
+                trial = pd.DataFrame([config | res])
+                print(trial)
 
-                        if not args.dry_run:
-                            if out is None:
-                                out = open(args.output, 'a')
+                if not args.dry_run:
+                    if out is None:
+                        out = open(args.output, 'a')
 
-                                if out.tell() == 0:
-                                    htk_cols = ["binary", "instructions_I", "instructions_E", "LLC-loads_I", "LLC-loads_E", "LLC-load-misses_I", "LLC-load-misses_E", "CPUTIME_E", "CPUTIME_I"]
-                                    header = trial.columns.to_list() + htk_cols
-                                    print('\t'.join(header), file=out)
+                        if out.tell() == 0:
+                            htk_cols = ["binary", "instructions_I", "instructions_E", "LLC-loads_I", "LLC-loads_E", "LLC-load-misses_I", "LLC-load-misses_E", "CPUTIME_E", "CPUTIME_I"]
+                            header = trial.columns.to_list() + htk_cols
+                            print('\t'.join(header), file=out)
 
-                            trial.to_csv(out, index=False, sep='\t', header=False)
-                            out.flush()
-    finally:
-        for child in children:
-            child.kill()
+                    trial.to_csv(out, index=False, sep='\t', header=False)
+                    out.flush()
+        finally:
+            for child in children:
+                child.kill()
 
 if __name__ == '__main__':
     main()
