@@ -9,14 +9,13 @@ import re
 import time
 import itertools
 
-TIMEOUT_S = 60*10
-
 app_cmds = {
     'mini_histo':   'test/histo 10000 100000 1',
     'histo':        'test/histo 19660800 100000000 1',
     'triangle':     'test/bale/triangle -n 1787345',
     'transpose':    'test/bale/transpose_matrix -n 1787345',
     'sssp':         'test/bale/sssp -n 1787345',
+    'qs':           'apps/qs/src/qs -i apps/qs/Examples/CTS2_Benchmark/CTS2-N5.inp -X 64 -Y 64 -Z 32 -x 64 -y 64 -z 32 -I 4 -J 4 -K 2 -n 1310720'
 }
 
 app_time_pat = {
@@ -25,6 +24,7 @@ app_time_pat = {
     'triangle':     '^\s+Buddy:\s+([\d\.]+)',
     'transpose':    '^\s+Buddy:\s+([\d\.]+)',
     'sssp':         '^Bellman-Ford Buddy:\s+([\d\.]+)',
+    'qs':           '^cycleTracking\s+\S+\s+\S+\s+(\S+)'
 }
 
 children = []
@@ -50,13 +50,23 @@ def run_trial(config, path, dry_run):
     else:
         raise Exception(f'unknown offload "{config["offload"]}"')
 
-    proxy_cmd = f'mpirun -np 2 -H {hosts} -bind-to none env OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} {numactl} {build}/src/buddy-proxy'
-    app_cmd = f'mpirun -np 32 -H intel01:16,intel02:16 {app_pre} numactl -N0 $(which hpcrun) -o {htk_path} -ds -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME host-htk/{app_cmds[config["app"]]}'
+    proxy_cmd = (f'mpirun -np 2 -H {hosts} '
+        f'-bind-to none env '
+        f'OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} '
+        f'{numactl} {build}/src/buddy-proxy')
+
+    app_cmd = (f'mpirun -np 32 -H intel01:16,intel02:16 '
+        f'env BUDDY_SENDBUF={config["send_bufs"]} BUDDY_RECVBUF={config["recv_bufs"]} '
+        f'{app_pre} numactl -N0 '
+        f'$(which hpcrun) -o {htk_path} -ds -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME '
+        f'host-htk/{app_cmds[config["app"]]}')
 
     if dry_run:
         print(proxy_cmd)
         print(app_cmd)
     else:
+        print(path)
+
         proxy_log = open(os.path.join(path, 'proxy.log'), 'w')
         app_log = open(os.path.join(path, 'app.log'), 'w')
 
@@ -155,11 +165,14 @@ def main():
                 else:
                     uid = args.uid
 
+                send_bufs, recv_bufs = bufs.split(':')
+
                 config = {
                     'uid': uid,
                     'app': app,
                     'offload': offload,
-                    'bufs': bufs,
+                    'send_bufs': send_bufs,
+                    'recv_bufs': recv_bufs,
                     'threads': threads,
                     'quiet_time': args.quiet_time,
                 }
