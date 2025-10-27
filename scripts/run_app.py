@@ -18,13 +18,27 @@ app_cmds = {
     'qs':           'apps/qs/src/qs -i apps/qs/Examples/CTS2_Benchmark/CTS2-N5.inp -X 64 -Y 64 -Z 32 -x 64 -y 64 -z 32 -I 4 -J 4 -K 2 -n 1310720'
 }
 
-app_time_pat = {
-    'mini_histo':   '^time:\s+([\d\.]+)',
-    'histo':        '^time:\s+([\d\.]+)',
-    'triangle':     '^\s+Buddy:\s+([\d\.]+)',
-    'transpose':    '^\s+Buddy:\s+([\d\.]+)',
-    'sssp':         '^Bellman-Ford Buddy:\s+([\d\.]+)',
-    'qs':           '^cycleTracking\s+\S+\s+\S+\s+(\S+)'
+def match_pat(s):
+    pat = re.compile(s)
+
+    def match_log(log):
+        for line in log:
+            if mat := re.search(pat, line):
+                return mat.group(1)
+
+    return match_log
+
+def qs_time(log):
+    us = match_pat('^cycleTracking\s+\S+\s+\S+\s+(\S+)')(log)
+    return str(float(us)*1e-6)
+
+app_time_extractor = {
+    'mini_histo':   match_pat('^time:\s+([\d\.]+)'),
+    'histo':        match_pat('^time:\s+([\d\.]+)'),
+    'triangle':     match_pat('^\s+Buddy:\s+([\d\.]+)'),
+    'transpose':    match_pat('^\s+Buddy:\s+([\d\.]+)'),
+    'sssp':         match_pat('^Bellman-Ford Buddy:\s+([\d\.]+)'),
+    'qs':           qs_time,
 }
 
 children = []
@@ -100,15 +114,12 @@ def run_trial(config, path, dry_run):
 def collect_metrics(config, path):
     res = {}
 
-    pat = re.compile(app_time_pat[config['app']])
-
     app_log = open(os.path.join(path, 'app.log'), 'r')
-    for line in app_log:
-        if mat := re.search(pat, line):
-            res['time'] = mat.group(1)
+    ex = app_time_extractor[config['app']]
+    res['time'] = ex(app_log)
 
-    # Fail if not found
-    res['time']
+    if res['time'] is None:
+        raise Exception('Failed to extract time!')
 
     msg_metrics = frozenset('_'.join([a, b, c]) for a in ('count', 'bytes', 'avg') for b in ('in', 'out') for c in ('local', 'remote'))
     other_metrics = frozenset([
@@ -138,7 +149,7 @@ def main():
     p.add_argument('-b', '--bufs', default='1:1')
     p.add_argument('-t', '--threads', default='8')
 
-    p.add_argument('-q', '--quiet-time', type=float)
+    p.add_argument('-q', '--quiet-time', default='')
 
     p.add_argument('-n', '--dry-run', action='store_true')
     p.add_argument('-c', '--collect-only', action='store_true')
@@ -158,8 +169,8 @@ def main():
 
     for i in range(args.repeat):
         try:
-            iters = itertools.product(*(arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload)))
-            for app, bufs, threads, offload in iters:
+            iters = itertools.product(*(arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload, args.quiet_time)))
+            for app, bufs, threads, offload, quiet_time in iters:
                 if args.uid is None:
                     uid = uuid.uuid4().hex
                 else:
@@ -174,7 +185,7 @@ def main():
                     'send_bufs': send_bufs,
                     'recv_bufs': recv_bufs,
                     'threads': threads,
-                    'quiet_time': args.quiet_time,
+                    'quiet_time': float(quiet_time) if quiet_time else None,
                 }
 
                 new_run = (not args.dry_run) and (not args.collect_only)
