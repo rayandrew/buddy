@@ -104,9 +104,9 @@ class SizeHistogram {
 
 class SendBufs {
   // Valid transitions:
-  // READY -> FLUSHING by sender thread
-  // FLUSHING -> COMPLETE by poller thread
-  // COMPLETE -> READY by sender thread
+  // READY -> FLUSHING by owner thread (the sender)
+  // FLUSHING -> COMPLETE by any thread (the poller)
+  // COMPLETE -> READY by owner thread (the sender)
 
   public:
     SendBufs() = default;
@@ -119,7 +119,7 @@ class SendBufs {
 
     const SizeHistogram& get_hist() const { return size_hist; }
 
-    // Called from sender thread
+    // Called from owner thread
     bool ready_for_send(unsigned i, unsigned j)
     {
       if (is_ready[idx(i, j)])
@@ -136,7 +136,7 @@ class SendBufs {
       return false;
     }
 
-    // Called from sender thread
+    // Called from owner thread
     void mark_flushing(unsigned i, unsigned j)
     {
       assert(is_ready[idx(i, j)]);
@@ -150,7 +150,7 @@ class SendBufs {
       is_complete[idx(i, j)] = false;
     }
 
-    // Called from poller thread
+    // Called from any thread
     void mark_complete(unsigned i, unsigned j)
     {
       assert(!is_complete[idx(i, j)]);
@@ -163,6 +163,7 @@ class SendBufs {
       *bytes = total_bytes;
     }
 
+    // Called from owner thread
     int get_ready_repid(unsigned i)
     {
       unsigned start = repid_ptrs[i];
@@ -170,7 +171,7 @@ class SendBufs {
       for (unsigned k = 0; k < m; k++) {
         unsigned j = (start + k) % m;
 
-        if (is_ready[idx(i, j)]) {
+        if (ready_for_send(i, j)) {
           repid_ptrs[i] = j;
           return j;
         }
