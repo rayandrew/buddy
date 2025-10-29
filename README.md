@@ -10,7 +10,12 @@ Two components:
 - OpenMP
 
 ## Build
-First, on the host, build the host component:
+
+First time, you may need to initialize git submodules:
+
+    git submodule update --init --recursive
+
+On the host, build the host component:
 
     mkdir build-host && cd build-host
     cmake .. -DCMAKE_BUILD_TYPE=[Release|Debug]

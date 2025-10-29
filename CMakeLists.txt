@@ -18,7 +18,15 @@ find_package(MPI REQUIRED)
 find_package(absl)
 find_package(OpenMP)
 
+add_library(hpctoolkit INTERFACE)
+if(HPCTOOLKIT)
+    target_link_libraries(hpctoolkit INTERFACE -lhpctoolkit)
+    target_compile_options(hpctoolkit INTERFACE -D HAVE_HPCTOOLKIT)
+    target_link_options(hpctoolkit INTERFACE -L "${HPCTOOLKIT}/lib/hpctoolkit")
+endif()
+
 include_directories(src valgrind)
 
 add_subdirectory(src)
 add_subdirectory(test)
+add_subdirectory(apps)

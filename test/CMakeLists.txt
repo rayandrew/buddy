@@ -5,13 +5,6 @@ if(absl_FOUND)
     target_compile_options(ygm-trace PRIVATE -Wno-narrowing)
 endif()
 
-add_library(hpctoolkit INTERFACE)
-if(HPCTOOLKIT)
-    target_link_libraries(hpctoolkit INTERFACE -lhpctoolkit)
-    target_compile_options(hpctoolkit INTERFACE -D HAVE_HPCTOOLKIT)
-    target_link_options(hpctoolkit INTERFACE -L "${HPCTOOLKIT}/lib/hpctoolkit")
-endif()
-
 add_executable(histo histo.cpp)
 target_link_libraries(histo PRIVATE buddy hpctoolkit)
 target_compile_definitions(histo PRIVATE MPP_RAW_MPI=1)

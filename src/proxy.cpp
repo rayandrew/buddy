@@ -253,9 +253,10 @@ void Proxy::rdma_loop()
 
   int num_threads = 0;
   uint64_t max_blocked = 0;
-  uint64_t quiet_flushes = 0;
+  uint64_t quiet_flush_events = 0;
+  uint64_t quiet_flush_bufs = 0;
 
-#pragma omp parallel reduction(max:max_blocked) reduction(+:quiet_flushes)
+#pragma omp parallel reduction(max:max_blocked) reduction(+:quiet_flush_events,quiet_flush_bufs)
   {
     int tid = omp_get_thread_num();
     last_thread_progress[tid] = omp_get_wtime();
@@ -284,9 +285,11 @@ void Proxy::rdma_loop()
         double now = omp_get_wtime();
         if (now > last_recv + config.quiet_time) {
           last_recv = now;
-          if (flush_all()) {
+          size_t num_flushed = flush_all();
+          if (num_flushed) {
             TRACE(1, "quiet time elapsed, all flushed!");
-            quiet_flushes++;
+            quiet_flush_events++;
+            quiet_flush_bufs += num_flushed;
           }
         }
 
@@ -327,10 +330,14 @@ void Proxy::rdma_loop()
   if (!rank)
     std::cout << "max_blocked_thread\t" << max_blocked_global << std::endl;
 
-  uint64_t quiet_flushes_global;
-  CHECK_MPI(MPI_Reduce(&quiet_flushes, &quiet_flushes_global, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
-  if (!rank)
-    std::cout << "quiet_flushes\t" << quiet_flushes_global << std::endl;
+  uint64_t flush_events_global;
+  uint64_t flush_bufs_global;
+  CHECK_MPI(MPI_Reduce(&quiet_flush_events, &flush_events_global, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
+  CHECK_MPI(MPI_Reduce(&quiet_flush_bufs, &flush_bufs_global, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD));
+  if (!rank) {
+    std::cout << "quiet_flush_events\t" << flush_events_global << std::endl;
+    std::cout << "quiet_flush_bufs\t" << flush_bufs_global << std::endl;
+  }
 
   print_counters(num_threads);
 }
@@ -617,23 +624,23 @@ bool Proxy::flush_local(unsigned idx, unsigned repid)
   return true;
 }
 
-bool Proxy::flush_all()
+size_t Proxy::flush_all()
 {
   int tid = omp_get_thread_num();
-  bool flushed = false;
+  size_t num_flushed = 0;
 
   for (unsigned i = 0; i < num_clients; i++)
     if (d2h_send[tid].ready_for_send(i, 0))
       if (flush_local(i, 0))
-        flushed = true;
+        num_flushed++;
 
   for (unsigned i = 0; i < num_remotes; i++)
     for (unsigned j = 0; j < config.d2d_depth; j++)
       if (d2d_send[tid].ready_for_send(i, j))
         if (flush_remote(i, j))
-          flushed = true;
+          num_flushed++;
 
-  return flushed;
+  return num_flushed;
 }
 
 SendBufs::SendBufs(unsigned n, unsigned m, unsigned size)

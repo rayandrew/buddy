@@ -61,7 +61,8 @@ int main(int argc, char **argv)
 
     if (!local_size) {
       local_size = msg.local_size;
-      std::cout << "number of local ranks = " << msg.local_size << std::endl;
+      if (!rank)
+        std::cout << "number of local ranks = " << msg.local_size << std::endl;
       conn_list = new int[local_size];
       ranks = new int[local_size];
     } else
@@ -69,19 +70,18 @@ int main(int argc, char **argv)
 
     if (!world_size) {
       world_size = msg.world_size;
-      std::cout << "number of total ranks = " << msg.world_size << std::endl;
+      if (!rank)
+        std::cout << "number of total ranks = " << msg.world_size << std::endl;
     } else
       CHECK(world_size == msg.world_size);
 
     if (!h2d_size) {
       h2d_size = msg.h2d_size;
-      std::cout << "h2d_size " << msg.h2d_size << std::endl;
     } else
       CHECK(h2d_size == msg.h2d_size);
 
     if (!d2h_size) {
       d2h_size = msg.d2h_size;
-      std::cout << "d2h_size " << msg.d2h_size << std::endl;
     } else
       CHECK(d2h_size == msg.d2h_size);
 
@@ -183,6 +183,12 @@ int main(int argc, char **argv)
 
   config.h2d_size = h2d_size;
   config.d2h_size = d2h_size;
+
+  if (!rank) {
+    std::cout << "=== proxy config ==" << std::endl;
+    std::cout << config;
+    std::cout << "===================" << std::endl;
+  }
 
   buddy::dpu::proxy_cqs cqs = {
     .local_srq = local_cqs.srq,

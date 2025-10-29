@@ -1,3 +1,6 @@
 [submodule "test/ember"]
 	path = test/ember
 	url = https://github.com/sstsimulator/ember.git
+[submodule "apps/qs"]
+	path = apps/qs
+	url = git@github.com:SPS-Lab/quicksilver-buddy.git

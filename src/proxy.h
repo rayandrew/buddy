@@ -19,6 +19,17 @@ struct ProxyConfig {
   double quiet_time = 1e-3;
 };
 
+inline std::ostream& operator<<(std::ostream& os, const ProxyConfig& config)
+{
+  os << "trace " << config.trace << std::endl;
+  os << "h2d_size " << config.h2d_size << std::endl;
+  os << "d2h_size " << config.d2h_size << std::endl;
+  os << "d2d_size " << config.d2d_size << std::endl;
+  os << "timeout " << config.timeout << std::endl;
+  os << "quiet_time " << config.quiet_time << std::endl;
+  return os;
+}
+
 struct route {
   uint32_t remote : 1;
   uint32_t idx : 31;
@@ -250,7 +261,7 @@ class Proxy {
     void poll_send_queue();
 
     bool route_reqs(ReqBufRead& reader);
-    bool flush_all();
+    size_t flush_all();
     bool flush(route r, unsigned repid);
     bool flush_local(unsigned idx, unsigned repid);
     bool flush_remote(unsigned idx, unsigned repid);
