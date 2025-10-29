@@ -281,7 +281,7 @@ void Proxy::rdma_loop()
 
       if (recv) {
         last_recv = omp_get_wtime();
-      } else {
+      } else if (config.quiet_time >= 0) {
         double now = omp_get_wtime();
         if (now > last_recv + config.quiet_time) {
           last_recv = now;
@@ -554,6 +554,11 @@ bool Proxy::route_reqs(ReqBufRead &reader)
 
     if (repid < 0) {
       // No free send buffers
+        if (r.remote)
+          TRACE(2, "failed route to " << head->dst << " (remote " << r.idx << ")");
+        else
+          TRACE(2, "failed route to " << head->dst << " (local " << r.idx << ")");
+
       poll_send_queue();
       complete = false;
       break;
