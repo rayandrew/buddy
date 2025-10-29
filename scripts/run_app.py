@@ -194,12 +194,12 @@ def main():
                     os.makedirs(path)
 
                 run_trial(config, path, not new_run)
-                res = collect_metrics(config, path)
-
-                trial = pd.DataFrame([config | res])
-                print(trial)
-
                 if not args.dry_run:
+                    res = collect_metrics(config, path)
+
+                    trial = pd.DataFrame([config | res])
+                    print(trial)
+
                     if out is None:
                         out = open(args.output, 'a')
 
