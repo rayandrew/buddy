@@ -66,11 +66,11 @@ def run_trial(config, path, dry_run):
 
     proxy_cmd = (f'mpirun -np 2 -H {hosts} '
         f'-bind-to none env '
-        f'OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} '
+        f'OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} BUDDY_D2D_SIZE={config["dpu_bufsize"]} '
         f'{numactl} {build}/src/buddy-proxy')
 
     app_cmd = (f'mpirun -np 32 -H intel01:16,intel02:16 '
-        f'env BUDDY_SENDBUF={config["send_bufs"]} BUDDY_RECVBUF={config["recv_bufs"]} '
+        f'env BUDDY_SENDBUF={config["send_bufs"]} BUDDY_RECVBUF={config["recv_bufs"]} BUDDY_BUFSIZE={config["host_bufsize"]} '
         f'{app_pre} numactl -N0 '
         f'$(which hpcrun) -o {htk_path} -ds -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME '
         f'host-htk/{app_cmds[config["app"]]}')
@@ -148,8 +148,9 @@ def main():
 
     p.add_argument('-b', '--bufs', default='1:1')
     p.add_argument('-t', '--threads', default='8')
-
     p.add_argument('-q', '--quiet-time', default='')
+    p.add_argument('-H', '--host-bufsize', default='')
+    p.add_argument('-D', '--dpu-bufsize', default='')
 
     p.add_argument('-n', '--dry-run', action='store_true')
     p.add_argument('-c', '--collect-only', action='store_true')
@@ -169,8 +170,8 @@ def main():
 
     for i in range(args.repeat):
         try:
-            iters = itertools.product(*(arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload, args.quiet_time)))
-            for app, bufs, threads, offload, quiet_time in iters:
+            iters = itertools.product(*(arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload, args.quiet_time, args.host_bufsize, args.dpu_bufsize)))
+            for app, bufs, threads, offload, quiet_time, host_bufsize, dpu_bufsize in iters:
                 if args.uid is None:
                     uid = uuid.uuid4().hex
                 else:
@@ -185,7 +186,9 @@ def main():
                     'send_bufs': send_bufs,
                     'recv_bufs': recv_bufs,
                     'threads': threads,
-                    'quiet_time': float(quiet_time) if quiet_time else None,
+                    'quiet_time': float(quiet_time) if quiet_time else '',
+                    'host_bufsize': host_bufsize,
+                    'dpu_bufsize': dpu_bufsize,
                 }
 
                 new_run = (not args.dry_run) and (not args.collect_only)

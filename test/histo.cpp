@@ -29,7 +29,7 @@ extern int xmpi_init(int argc, char* argv[]);
 #include "util_mpi.h"
 #include "profile.h"
 
-const size_t MAXLEN = 32*1024;
+size_t bufsize = 1*1024*1024;
 
 long xmpi_my_proc = 0;
 long xmpi_n_procs = 0;
@@ -93,11 +93,13 @@ main(int argc, char* argv[])
   long* counts = (long*)calloc(bins, sizeof(long));
   long area = PROCS * bins;
 
-  buddy_init(MPI_COMM_WORLD, MAXLEN, MAXLEN);
-
   unsigned num_sendbuf = 1;
   unsigned num_recvbuf = 1;
   char *env;
+
+  env = getenv("BUDDY_BUFSIZE");
+  if (env && *env)
+    bufsize = atoi(env);
 
   env = getenv("BUDDY_SENDBUF");
   if (env && *env)
@@ -108,16 +110,18 @@ main(int argc, char* argv[])
   if (env && *env)
     num_recvbuf = atoi(env);
 
-  buddy_buf *send_buf = buddy_alloc(num_sendbuf*MAXLEN);
+  buddy_init(MPI_COMM_WORLD, bufsize, bufsize);
+
+  buddy_buf *send_buf = buddy_alloc(num_sendbuf*bufsize);
   int curr_send = 0;
   bool send_busy[num_sendbuf] = {};
 
-  buddy::ReqBufWrite writer((char *)send_buf->addr, MAXLEN);
+  buddy::ReqBufWrite writer((char *)send_buf->addr, bufsize);
 
-  buddy_buf *recv_buf = buddy_alloc(num_recvbuf*MAXLEN);
+  buddy_buf *recv_buf = buddy_alloc(num_recvbuf*bufsize);
 
   for (unsigned i = 0; i < num_recvbuf; i++)
-    buddy_recv(recv_buf, MAXLEN, i*MAXLEN, num_sendbuf+i);
+    buddy_recv(recv_buf, bufsize, i*bufsize, num_sendbuf+i);
 
   int status = EXIT_FAILURE;
 
@@ -146,7 +150,7 @@ main(int argc, char* argv[])
         char *data;
         while (!(data = writer.append_head(head))) {
           assert(!send_busy[curr_send]);
-          buddy_send(send_buf, writer.get_pos(), curr_send*MAXLEN, curr_send);
+          buddy_send(send_buf, writer.get_pos(), curr_send*bufsize, curr_send);
           send_busy[curr_send] = true;
 
           send_block = true;
@@ -154,7 +158,7 @@ main(int argc, char* argv[])
             int j = (curr_send + i) % num_sendbuf;
             if (!send_busy[j]) {
               curr_send = j;
-              writer = buddy::ReqBufWrite((char *)send_buf->addr + curr_send*MAXLEN, MAXLEN);
+              writer = buddy::ReqBufWrite((char *)send_buf->addr + curr_send*bufsize, bufsize);
               send_block = false;
               break;
             }
@@ -171,7 +175,7 @@ main(int argc, char* argv[])
 
       if (n == load) {
         // Final send
-        buddy_send(send_buf, writer.get_pos(), curr_send*MAXLEN, curr_send);
+        buddy_send(send_buf, writer.get_pos(), curr_send*bufsize, curr_send);
         send_busy[curr_send] = true;
       }
 
@@ -194,11 +198,11 @@ poll:
         for (int i = 0; i < npoll; i++) {
           if (ids[i] < num_sendbuf) {
             curr_send = ids[i];
-            writer = buddy::ReqBufWrite((char *)send_buf->addr + curr_send*MAXLEN, MAXLEN);
+            writer = buddy::ReqBufWrite((char *)send_buf->addr + curr_send*bufsize, bufsize);
             send_busy[curr_send] = false;
             send_block = false;
           } else {
-            size_t offset = (ids[i] - num_sendbuf)*MAXLEN;
+            size_t offset = (ids[i] - num_sendbuf)*bufsize;
             buddy::ReqBufRead reader((char *)recv_buf->addr + offset, sizes[i]);
 
             tic(TT_BUFPROC);
@@ -212,7 +216,7 @@ poll:
             }
             toc(TT_BUFPROC);
 
-            buddy_recv(recv_buf, MAXLEN, offset, ids[i]);
+            buddy_recv(recv_buf, bufsize, offset, ids[i]);
           }
         }
 

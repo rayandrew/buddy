@@ -181,6 +181,10 @@ int main(int argc, char **argv)
   if (env && *env)
     config.quiet_time = strtod(env, NULL);
 
+  env = getenv("BUDDY_D2D_SIZE");
+  if (env && *env)
+    config.d2d_size = atoi(env);
+
   config.h2d_size = h2d_size;
   config.d2h_size = d2h_size;
 
