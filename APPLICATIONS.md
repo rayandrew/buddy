@@ -4,6 +4,9 @@ Six apps have been ported to Buddy so far.
 
 The majority of the applications are currently using only a single send and receive buffer. However, Histogram and Quicksilver support increasing the window size by setting the `BUDDY_SENDBUF` and `BUDDY_RECVBUF` environment variables to change the number of send and receive buffers, which can help to prevent deadlocks and increase throughput. 
 
+The `script/run_app.py` is available for easily performing experiments with the
+different apps.
+
 ## Bale Apps
 
 Five apps from Bale/Conveyors are included in this repository.
@@ -40,7 +43,8 @@ Example: `mpirun -np 16 build/test/bale/sssp -N 1600000`
 
 ## Quicksilver
 
-The ported Quicksilver is available in a different repository: https://github.com/SPS-Lab/quicksilver-buddy. Build using the Makefile in the src/ directory. Change the BUDDY variable in the Makefile to point to your Buddy build directory.
+The ported Quicksilver is available as a git submodule under `apps/qs`. It is
+built automatically together with Buddy.
 
 Parameters: check the `Examples/CTS2_Benchmark/CTS2_scaling.sh` script. I added a CTS2-N5.inp file which only has 5 cycles instead of 100 to reduce the runtime for testing purposes.
 
