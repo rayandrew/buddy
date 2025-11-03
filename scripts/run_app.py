@@ -43,7 +43,7 @@ app_time_extractor = {
 
 children = []
 
-def run_trial(config, path, dry_run):
+def run_trial(config, path, dry_run, trace):
     htk_path = os.path.join(path, 'profile')
 
     if config['offload'] == 'none':
@@ -64,15 +64,23 @@ def run_trial(config, path, dry_run):
     else:
         raise Exception(f'unknown offload "{config["offload"]}"')
 
+    trace_proxy = trace == 'proxy' or trace == 'all'
+    trace_app = trace == 'app' or trace == 'all'
+
+    if trace_proxy:
+        raise Exception('trace proxy not implemented')
+
     proxy_cmd = (f'mpirun -np 2 -H {hosts} '
         f'-bind-to none env '
         f'OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} BUDDY_D2D_SIZE={config["dpu_bufsize"]} '
         f'{numactl} {build}/src/buddy-proxy')
 
+    trace_opt = '-t' if trace_app else '-ds'
+
     app_cmd = (f'mpirun -np 32 -H intel01:16,intel02:16 '
         f'env BUDDY_SENDBUF={config["send_bufs"]} BUDDY_RECVBUF={config["recv_bufs"]} BUDDY_BUFSIZE={config["host_bufsize"]} '
         f'{app_pre} numactl -N0 '
-        f'$(which hpcrun) -o {htk_path} -ds -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME '
+        f'$(which hpcrun) -o {htk_path} {trace_opt} -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME '
         f'host-htk/{app_cmds[config["app"]]}')
 
     if dry_run:
@@ -152,6 +160,8 @@ def main():
     p.add_argument('-H', '--host-bufsize', default='')
     p.add_argument('-D', '--dpu-bufsize', default='')
 
+    p.add_argument('-T', '--trace')
+
     p.add_argument('-n', '--dry-run', action='store_true')
     p.add_argument('-c', '--collect-only', action='store_true')
     p.add_argument('-u', '--uid')
@@ -196,7 +206,7 @@ def main():
                 if new_run:
                     os.makedirs(path)
 
-                run_trial(config, path, not new_run)
+                run_trial(config, path, not new_run, args.trace)
                 if not args.dry_run:
                     res = collect_metrics(config, path)
 
