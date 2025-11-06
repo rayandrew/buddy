@@ -18,7 +18,7 @@ endif()
 #target_link_libraries(buddy_mpi PRIVATE MPI::MPI_C buddy_common absl::flat_hash_map)
 #endif()
 
-add_library(buddy SHARED ${common_src} host_api.cpp dpu_conn.cpp)
+add_library(buddy SHARED ${common_src} host_api.cpp dpu_conn.cpp hostbufs.cpp)
 target_link_libraries(buddy PRIVATE buddy_common)
 target_link_libraries(buddy PUBLIC MPI::MPI_C)
 
