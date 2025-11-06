@@ -72,7 +72,7 @@ def run_trial(config, path, dry_run, trace):
 
     proxy_cmd = (f'mpirun -np 2 -H {hosts} '
         f'-bind-to none env '
-        f'OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} BUDDY_D2D_SIZE={config["dpu_bufsize"]} '
+        f'OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} BUDDY_D2D_SIZE={config["dpu_bufsize"]} BUDDY_RECV_DEPTH_FACTOR={config["recv_depth_factor"]} '
         f'{numactl} {build}/src/buddy-proxy')
 
     trace_opt = '-t' if trace_app else '-ds'
@@ -159,6 +159,7 @@ def main():
     p.add_argument('-q', '--quiet-time', default='')
     p.add_argument('-H', '--host-bufsize', default='')
     p.add_argument('-D', '--dpu-bufsize', default='')
+    p.add_argument('-f', '--recv-depth-factor', default='4')
 
     p.add_argument('-T', '--trace')
 
@@ -180,8 +181,8 @@ def main():
 
     for i in range(args.repeat):
         try:
-            iters = itertools.product(*(arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload, args.quiet_time, args.host_bufsize, args.dpu_bufsize)))
-            for app, bufs, threads, offload, quiet_time, host_bufsize, dpu_bufsize in iters:
+            iters = itertools.product(*(arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload, args.quiet_time, args.host_bufsize, args.dpu_bufsize, args.recv_depth_factor)))
+            for app, bufs, threads, offload, quiet_time, host_bufsize, dpu_bufsize, recv_depth_factor in iters:
                 if args.uid is None:
                     uid = uuid.uuid4().hex
                 else:
@@ -199,6 +200,7 @@ def main():
                     'quiet_time': float(quiet_time) if quiet_time else '',
                     'host_bufsize': host_bufsize,
                     'dpu_bufsize': dpu_bufsize,
+                    'recv_depth_factor': recv_depth_factor,
                 }
 
                 new_run = (not args.dry_run) and (not args.collect_only)

@@ -185,6 +185,10 @@ int main(int argc, char **argv)
   if (env && *env)
     config.d2d_size = atoi(env);
 
+  env = getenv("BUDDY_RECV_DEPTH_FACTOR");
+  if (env && *env)
+    config.recv_depth_factor = atoi(env);
+
   config.h2d_size = h2d_size;
   config.d2h_size = d2h_size;
 
