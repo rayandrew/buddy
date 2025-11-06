@@ -8,6 +8,7 @@ import subprocess
 import re
 import time
 import itertools
+import random
 
 app_cmds = {
     'mini_histo':   'test/histo 10000 100000 1',
@@ -147,6 +148,35 @@ def collect_metrics(config, path):
 
     return res
 
+def single_run(config, output, dry_run=False, trace=False):
+    try:
+        config = {'uid': uuid.uuid4().hex} | config
+
+        path = os.path.join('app_results', config['uid'])
+        if not dry_run:
+            os.makedirs(path)
+
+        run_trial(config, path, dry_run, trace)
+
+        if not dry_run:
+            res = collect_metrics(config, path)
+
+            trial = pd.DataFrame([config | res])
+            print(trial)
+
+            with open(output, 'a') as out:
+                if out.tell() == 0:
+                    htk_cols = ["binary", "instructions_I", "instructions_E", "LLC-loads_I", "LLC-loads_E", "LLC-load-misses_I", "LLC-load-misses_E", "CPUTIME_E", "CPUTIME_I"]
+                    header = trial.columns.to_list() + htk_cols
+                    print('\t'.join(header), file=out)
+
+                trial.to_csv(out, index=False, sep='\t', header=False)
+    finally:
+        global children
+        for child in children:
+            child.kill()
+        children = []
+
 def main():
     p = argparse.ArgumentParser()
 
@@ -162,12 +192,9 @@ def main():
     p.add_argument('-f', '--recv-depth-factor', default='4')
 
     p.add_argument('-T', '--trace')
-
     p.add_argument('-n', '--dry-run', action='store_true')
-    p.add_argument('-c', '--collect-only', action='store_true')
-    p.add_argument('-u', '--uid')
-
     p.add_argument('-r', '--repeat', default=1, type=int)
+    p.add_argument('-R', '--randomize', action='store_true')
 
     args = p.parse_args()
 
@@ -180,54 +207,28 @@ def main():
     out = None
 
     for i in range(args.repeat):
-        try:
-            iters = itertools.product(*(arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload, args.quiet_time, args.host_bufsize, args.dpu_bufsize, args.recv_depth_factor)))
-            for app, bufs, threads, offload, quiet_time, host_bufsize, dpu_bufsize, recv_depth_factor in iters:
-                if args.uid is None:
-                    uid = uuid.uuid4().hex
-                else:
-                    uid = args.uid
+        params = [arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload, args.quiet_time, args.host_bufsize, args.dpu_bufsize, args.recv_depth_factor)]
 
-                send_bufs, recv_bufs = bufs.split(':')
+        if args.randomize:
+            iters = [(random.choice(p) for p in params)]
+        else:
+            iters = itertools.product(*params)
 
-                config = {
-                    'uid': uid,
-                    'app': app,
-                    'offload': offload,
-                    'send_bufs': send_bufs,
-                    'recv_bufs': recv_bufs,
-                    'threads': threads,
-                    'quiet_time': float(quiet_time) if quiet_time else '',
-                    'host_bufsize': host_bufsize,
-                    'dpu_bufsize': dpu_bufsize,
-                    'recv_depth_factor': recv_depth_factor,
-                }
+        for app, bufs, threads, offload, quiet_time, host_bufsize, dpu_bufsize, recv_depth_factor in iters:
+            send_bufs, recv_bufs = bufs.split(':')
+            config = {
+                'app': app,
+                'offload': offload,
+                'send_bufs': send_bufs,
+                'recv_bufs': recv_bufs,
+                'threads': threads,
+                'quiet_time': float(quiet_time) if quiet_time else '',
+                'host_bufsize': host_bufsize,
+                'dpu_bufsize': dpu_bufsize,
+                'recv_depth_factor': recv_depth_factor,
+            }
 
-                new_run = (not args.dry_run) and (not args.collect_only)
-                path = os.path.join('app_results', config['uid'])
-                if new_run:
-                    os.makedirs(path)
-
-                run_trial(config, path, not new_run, args.trace)
-                if not args.dry_run:
-                    res = collect_metrics(config, path)
-
-                    trial = pd.DataFrame([config | res])
-                    print(trial)
-
-                    if out is None:
-                        out = open(args.output, 'a')
-
-                        if out.tell() == 0:
-                            htk_cols = ["binary", "instructions_I", "instructions_E", "LLC-loads_I", "LLC-loads_E", "LLC-load-misses_I", "LLC-load-misses_E", "CPUTIME_E", "CPUTIME_I"]
-                            header = trial.columns.to_list() + htk_cols
-                            print('\t'.join(header), file=out)
-
-                    trial.to_csv(out, index=False, sep='\t', header=False)
-                    out.flush()
-        finally:
-            for child in children:
-                child.kill()
+            single_run(config, args.output, dry_run=args.dry_run, trace=args.trace)
 
 if __name__ == '__main__':
     main()
