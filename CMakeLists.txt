@@ -29,4 +29,8 @@ include_directories(src valgrind)
 
 add_subdirectory(src)
 add_subdirectory(test)
-add_subdirectory(apps)
+
+option(BUILD_APPS "Build apps/")
+if(BUILD_APPS)
+  add_subdirectory(apps)
+endif()
