@@ -280,6 +280,9 @@ def main():
     if os.system('which hpcrun > /dev/null'):
         raise Exception('Cannot find hpctoolkit')
 
+    if not os.system('pgrep mpirun > /dev/null'):
+        raise Exception('mpirun already running!')
+
     if args.optimize:
         fixed = {
             'app': args.app,
