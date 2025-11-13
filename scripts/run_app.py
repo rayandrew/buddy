@@ -246,6 +246,9 @@ def optimize(fixed, opts, output):
                 except IndexError:
                     print(f'warning: frontier hit bounds for option {key}')
 
+    # To avoid bias in search direction
+    random.shuffle(frontier)
+
     new = 0
     skipped = 0
     failed = 0
@@ -257,6 +260,9 @@ def optimize(fixed, opts, output):
             try:
                 single_run(fixed|x, output, record_error=True, timeout=timeout)
                 new += 1
+
+                # Early stop to go back an re-evaluate the threshold
+                break
             except ChildCrashed:
                 failed += 1
     print(f'{new} new runs, {skipped} skipped runs, {failed} failed runs')
