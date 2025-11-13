@@ -42,8 +42,6 @@ app_time_extractor = {
     'qs':           qs_time,
 }
 
-children = []
-
 class ChildKilled(Exception): pass
 class ChildCrashed(Exception): pass
 
@@ -74,9 +72,14 @@ def run_trial(config, path, dry_run, trace, timeout='0'):
     if trace_proxy:
         raise Exception('trace proxy not implemented')
 
+    # Use exec to ensure that .kill() affects the mpirun and not just the shell
+    # process, since wer are using Popen(shell=True)
+    # https://stackoverflow.com/a/13143013
+
     # The timeout command could be used on either one of our children
     # setting the parameter to 0 disables it (default)
-    proxy_cmd = (f'timeout {timeout} '
+
+    proxy_cmd = (f'exec timeout {timeout} '
         f'mpirun -np 2 -H {hosts} '
         f'-bind-to none env '
         f'OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} BUDDY_D2D_SIZE={config["dpu_bufsize"]} BUDDY_RECV_DEPTH_FACTOR={config["recv_depth_factor"]} '
@@ -84,12 +87,13 @@ def run_trial(config, path, dry_run, trace, timeout='0'):
 
     trace_opt = '-t' if trace_app else '-ds'
 
-    app_cmd = (f'mpirun -np 32 -H intel01:16,intel02:16 '
+    app_cmd = (f'exec mpirun -np 32 -H intel01:16,intel02:16 '
         f'env BUDDY_SENDBUF={config["send_bufs"]} BUDDY_RECVBUF={config["recv_bufs"]} BUDDY_BUFSIZE={config["host_bufsize"]} '
         f'{app_pre} numactl -N0 '
         f'$(which hpcrun) -o {htk_path} {trace_opt} -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME '
         f'host-htk/{app_cmds[config["app"]]}')
 
+    ret = 0
     if dry_run:
         print(proxy_cmd)
         print(app_cmd)
@@ -99,33 +103,41 @@ def run_trial(config, path, dry_run, trace, timeout='0'):
         proxy_log = open(os.path.join(path, 'proxy.log'), 'w')
         app_log = open(os.path.join(path, 'app.log'), 'w')
 
-        print(proxy_cmd)
-        proxy_proc = subprocess.Popen(proxy_cmd, shell=True, stdout=proxy_log, stderr=subprocess.STDOUT)
-
-        children = [proxy_proc]
-
-        time.sleep(0.1)
-
-        print(app_cmd)
-        app_proc = subprocess.Popen(app_cmd, shell=True, stdout=app_log, stderr=subprocess.STDOUT)
-
-        children.append(app_proc)
-
-        for i in range(2):
-            pid, status = os.wait()
-            if os.WIFEXITED(status):
-                if os.WEXITSTATUS(status) != 0:
-                    raise ChildCrashed()
-            if os.WIFSIGNALED(status):
-                raise ChildKilled()
-
         children = []
+        try:
+            print(proxy_cmd)
+            proxy_proc = subprocess.Popen(proxy_cmd, shell=True, stdout=proxy_log, stderr=subprocess.STDOUT)
+
+            children = [proxy_proc]
+
+            time.sleep(0.1)
+
+            print(app_cmd)
+            app_proc = subprocess.Popen(app_cmd, shell=True, stdout=app_log, stderr=subprocess.STDOUT)
+
+            children.append(app_proc)
+
+            for i in range(2):
+                pid, status = os.wait()
+                if os.WIFEXITED(status):
+                    code = os.WEXITSTATUS(status)
+                    if code != 0:
+                        ret = code
+                        break
+                if os.WIFSIGNALED(status):
+                    raise ChildKilled()
+        finally:
+            for child in children:
+                child.kill()
+                child.wait()
 
         # for tool in ("hpcstruct", "hpcprof"):
         #     log = open(os.path.join(path, f'{tool}.log'), 'w')
         #     cmd = [tool, htk_path]
         #     print(" ".join(cmd))
         #     subprocess.run(cmd, check=True, stderr=subprocess.STDOUT, stdout=log)
+
+    return ret
 
 def collect_metrics(config, path):
     res = {}
@@ -172,25 +184,25 @@ def single_run(config, output, dry_run=False, trace=False, record_error=False, t
     # paths, eg main() and optimize()
     config = {'uid': uuid.uuid4().hex} | dict(sorted(config.items()))
 
+    if not dry_run and not os.system('pgrep mpirun > /dev/null'):
+        raise Exception('mpirun already running!')
+
     path = os.path.join('app_results', config['uid'])
     if not dry_run:
         os.makedirs(path)
 
-    ok = False
-    try:
-        run_trial(config, path, dry_run, trace, timeout=timeout)
-        if not dry_run:
-            res = collect_metrics(config, path)
+    status = run_trial(config, path, dry_run, trace, timeout=timeout)
+
+    if not dry_run:
+        res = {'status': status}
+        if status == 0:
+            res |= collect_metrics(config, path)
+
+        if status == 0 or record_error:
             log_trial(output, config, res)
-    except ChildCrashed:
-        if not dry_run and record_error:
-            log_trial(output, config, {})
-        raise
-    finally:
-        global children
-        for child in children:
-            child.kill()
-        children = []
+
+        if status != 0:
+            raise ChildCrashed()
 
 def df_select(df, kvs):
     mask = pd.Series([True] * len(df))
@@ -279,9 +291,6 @@ def main():
 
     if os.system('which hpcrun > /dev/null'):
         raise Exception('Cannot find hpctoolkit')
-
-    if not os.system('pgrep mpirun > /dev/null'):
-        raise Exception('mpirun already running!')
 
     if args.optimize:
         fixed = {
