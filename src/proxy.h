@@ -239,6 +239,7 @@ class Proxy {
     rdma::QP *local_qps;
     rdma::QP *remote_qps;
 
+    const int num_threads;
     const size_t h2d_depth;
     const size_t d2d_depth;
     const size_t rx_depth;
@@ -268,7 +269,7 @@ class Proxy {
     bool flush_local(unsigned idx, unsigned repid);
     bool flush_remote(unsigned idx, unsigned repid);
 
-    void print_counters(int num_threads);
+    void print_counters();
 };
 
 } // namespace buddy::dpu

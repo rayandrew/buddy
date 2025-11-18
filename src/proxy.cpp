@@ -54,6 +54,19 @@ Proxy::~Proxy()
   }
 }
 
+int get_num_threads()
+{
+  int num_threads = omp_get_num_threads();
+
+#pragma omp parallel
+#pragma omp master
+  {
+    num_threads = omp_get_num_threads();
+  }
+
+  return num_threads;
+}
+
 Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     unsigned num_remotes, int world_size,
     rdma::QP *local_qps, rdma::QP *remote_qps,
@@ -65,20 +78,13 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   , cqs(cqs)
   , local_qps(local_qps)
   , remote_qps(remote_qps)
-  , h2d_depth(config.bufcount_local*num_clients)
-  , d2d_depth(config.bufcount_remote*num_remotes)
+  , num_threads(get_num_threads())
+  , h2d_depth(config.bufcount_local*num_clients*num_threads)
+  , d2d_depth(config.bufcount_remote*num_remotes*num_threads)
   , rx_depth(h2d_depth + d2d_depth)
   , local_idx_to_rank(ranks)
   , routing_table(routing_table)
 {
-  int num_threads = omp_get_num_threads();
-
-#pragma omp parallel
-#pragma omp master
-  {
-    num_threads = omp_get_num_threads();
-  }
-
   in_counters = new rdma_counters[num_threads];
 
   d2h_send = new SendBufs[num_threads];
@@ -122,7 +128,6 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 
 void Proxy::poll_send_queue()
 {
-  int num_threads = omp_get_num_threads();
   int thread_depth = rx_depth / num_threads;
   ibv_wc wc[thread_depth];
 
@@ -251,7 +256,6 @@ void Proxy::rdma_loop()
 {
   quit_counter = 0;
 
-  int num_threads = 0;
   uint64_t max_blocked = 0;
   uint64_t quiet_flush_events = 0;
   uint64_t quiet_flush_bufs = 0;
@@ -266,7 +270,6 @@ void Proxy::rdma_loop()
 #pragma omp barrier
 #pragma omp single
     {
-      num_threads = omp_get_num_threads();
       std::cout << num_threads << " rdma threads ready" << std::endl;
     }
 
@@ -339,7 +342,7 @@ void Proxy::rdma_loop()
     std::cout << "quiet_flush_bufs\t" << flush_bufs_global << std::endl;
   }
 
-  print_counters(num_threads);
+  print_counters();
 }
 
 void SizeHistogram::record(size_t size)
@@ -382,7 +385,7 @@ void SizeHistogram::print()
   std::cout << std::endl;
 }
 
-void Proxy::print_counters(int num_threads)
+void Proxy::print_counters()
 {
   rdma_counters in_total, out_total;
   for (int tid = 0; tid < num_threads; tid++) {
