@@ -65,8 +65,8 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   , cqs(cqs)
   , local_qps(local_qps)
   , remote_qps(remote_qps)
-  , h2d_depth(config.recv_depth_factor*num_clients)
-  , d2d_depth(config.recv_depth_factor*num_remotes)
+  , h2d_depth(config.bufcount_local*num_clients)
+  , d2d_depth(config.bufcount_remote*num_remotes)
   , rx_depth(h2d_depth + d2d_depth)
   , local_idx_to_rank(ranks)
   , routing_table(routing_table)
@@ -86,8 +86,8 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   last_thread_progress = new double[num_threads];
 
   for (int tid = 0; tid < num_threads; tid++) {
-    new (&d2h_send[tid]) SendBufs(num_clients, 1, config.d2h_size);
-    new (&d2d_send[tid]) SendBufs(num_remotes, config.d2d_depth, config.d2d_size);
+    new (&d2h_send[tid]) SendBufs(num_clients, config.bufcount_local, config.d2h_size);
+    new (&d2d_send[tid]) SendBufs(num_remotes, config.bufcount_remote, config.d2d_size);
   }
 
   size_t total_size_h2d = config.h2d_size * h2d_depth;
@@ -635,12 +635,13 @@ size_t Proxy::flush_all()
   size_t num_flushed = 0;
 
   for (unsigned i = 0; i < num_clients; i++)
-    if (d2h_send[tid].ready_for_send(i, 0))
-      if (flush_local(i, 0))
-        num_flushed++;
+    for (unsigned j = 0; j < config.bufcount_local; j++)
+      if (d2h_send[tid].ready_for_send(i, j))
+        if (flush_local(i, j))
+          num_flushed++;
 
   for (unsigned i = 0; i < num_remotes; i++)
-    for (unsigned j = 0; j < config.d2d_depth; j++)
+    for (unsigned j = 0; j < config.bufcount_remote; j++)
       if (d2d_send[tid].ready_for_send(i, j))
         if (flush_remote(i, j))
           num_flushed++;

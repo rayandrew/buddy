@@ -46,8 +46,6 @@ class ChildKilled(Exception): pass
 class ChildCrashed(Exception): pass
 
 def run_trial(config, path, dry_run, profile, timeout='0'):
-    htk_path = os.path.join(path, 'profile')
-
     if config['offload'] == 'none':
         hosts = 'intel01,intel02'
         numactl = 'numactl -N0'
@@ -93,6 +91,7 @@ def run_trial(config, path, dry_run, profile, timeout='0'):
     profile = ''
     app_dir = 'host-rel'
     if profile_app:
+        htk_path = os.path.join(path, 'profile')
         trace_opt = '-t' if trace_app else '-ds'
         profile = f'$(which hpcrun) -o {htk_path} {trace_opt} -e instructions -e LLC-loads -e LLC-load-misses -e BLOCKTIME -e CPUTIME'
         app_dir = 'host-htk'
@@ -107,11 +106,11 @@ def run_trial(config, path, dry_run, profile, timeout='0'):
     proxy_cmd = (f'exec timeout {timeout} '
         f'mpirun -np 2 -H {hosts} '
         f'-bind-to none env '
-        f'OMP_NUM_THREADS={config["threads"]} BUDDY_QUIET_TIME={config["quiet_time"]} BUDDY_D2D_SIZE={config["dpu_bufsize"]} BUDDY_RECV_DEPTH_FACTOR={config["recv_depth_factor"]} '
+        f'OMP_NUM_THREADS={config["threads_proxy"]} BUDDY_QUIET_TIME={config["idle_timeout"]} BUDDY_D2D_SIZE={config["bufsize_remote"]} BUDDY_BUFCOUNT_REMOTE={config["bufcount_proxy_remote"]} BUDDY_BUFCOUNT_LOCAL={config["bufcount_proxy_local"]} '
         f'{numactl} {build}/src/buddy-proxy')
 
     app_cmd = (f'exec mpirun -np 32 -H intel01:16,intel02:16 '
-        f'env BUDDY_SENDBUF={config["send_bufs"]} BUDDY_RECVBUF={config["recv_bufs"]} BUDDY_BUFSIZE={config["host_bufsize"]} '
+        f'env BUDDY_SENDBUF={config["bufcount_host"]} BUDDY_RECVBUF={config["bufcount_host"]} BUDDY_BUFSIZE={config["bufsize_local"]} '
         f'{app_pre} numactl -N0 {profile} '
         f'{app_dir}/{app_cmds[config["app"]]}')
 
@@ -298,12 +297,15 @@ def main():
     p.add_argument('app')
     p.add_argument('offload')
 
-    p.add_argument('-b', '--bufs', default='1:1')
-    p.add_argument('-t', '--threads', default='8')
-    p.add_argument('-q', '--quiet-time', default='')
-    p.add_argument('-H', '--host-bufsize', default='')
-    p.add_argument('-D', '--dpu-bufsize', default='')
-    p.add_argument('-f', '--recv-depth-factor', default='4')
+    p.add_argument('-S', '--bufsize-remote', default='')
+    p.add_argument('-s', '--bufsize-local', default='')
+
+    p.add_argument('-C', '--bufcount-proxy-remote', default='1')
+    p.add_argument('-c', '--bufcount-proxy-local', default='1')
+    p.add_argument('-H', '--bufcount-host', default='1')
+
+    p.add_argument('-t', '--threads-proxy', default='8')
+    p.add_argument('-i', '--idle-timeout', default='')
 
     p.add_argument('-P', '--profile')
     p.add_argument('-n', '--dry-run', action='store_true')
@@ -324,39 +326,39 @@ def main():
         fixed = {
             'app': args.app,
             'offload': args.offload,
-            'threads': int(args.threads),
         }
         opts = {
-            'send_bufs': [2**n for n in range(0, 6)],
-            'recv_bufs': [2**n for n in range(0, 6)],
-            'host_bufsize': [2**n for n in range(14, 24)],
-            'dpu_bufsize': [2**n for n in range(14, 24)],
-            'quiet_time': [2**n for n in range(-10, 1)],
-            'recv_depth_factor': [2**n for n in range(0, 6)],
+            'bufsize_remote': [2**n for n in range(14, 25)],
+            'bufsize_local': [2**n for n in range(14, 25)],
+            'bufcount_proxy_remote': [2**n for n in range(0, 7)],
+            'bufcount_proxy_local': [2**n for n in range(0, 7)],
+            'bufcount_host': [2**n for n in range(0, 7)],
+            'threads_proxy': list(range(1, 8+1)),
+            'idle_timeout': [2**n for n in range(-10, 1)],
         }
-        while optimize(fixed, opts, args.output) > 0: pass
+        while optimize(fixed, opts, args.output) > 0:
+            if args.repeat == 0: break
         return
 
     for i in range(args.repeat):
-        params = [arg.split(',') for arg in (args.app, args.bufs, args.threads, args.offload, args.quiet_time, args.host_bufsize, args.dpu_bufsize, args.recv_depth_factor)]
+        params = [arg.split(',') for arg in (args.app, args.offload, args.bufsize_remote, args.bufsize_local, args.bufcount_proxy_remote, args.bufcount_proxy_local, args.bufcount_host, args.threads_proxy, args.idle_timeout)]
 
         if args.randomize:
             iters = [(random.choice(p) for p in params)]
         else:
             iters = itertools.product(*params)
 
-        for app, bufs, threads, offload, quiet_time, host_bufsize, dpu_bufsize, recv_depth_factor in iters:
-            send_bufs, recv_bufs = bufs.split(':')
+        for app, offload, bufsize_remote, bufsize_local, bufcount_proxy_remote, bufcount_proxy_local, bufcount_host, threads_proxy, idle_timeout in iters:
             config = {
                 'app': app,
                 'offload': offload,
-                'send_bufs': send_bufs,
-                'recv_bufs': recv_bufs,
-                'threads': threads,
-                'quiet_time': float(quiet_time) if quiet_time else '',
-                'host_bufsize': host_bufsize,
-                'dpu_bufsize': dpu_bufsize,
-                'recv_depth_factor': recv_depth_factor,
+                'bufsize_remote': bufsize_remote,
+                'bufsize_local': bufsize_local,
+                'bufcount_proxy_remote': bufcount_proxy_remote,
+                'bufcount_proxy_local': bufcount_proxy_local,
+                'bufcount_host': bufcount_host,
+                'threads_proxy': threads_proxy,
+                'idle_timeout': float(idle_timeout) if idle_timeout else '',
             }
 
             single_run(config, args.output, dry_run=args.dry_run, profile=args.profile, record_error=args.record_errors)

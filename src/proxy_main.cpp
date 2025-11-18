@@ -185,9 +185,13 @@ int main(int argc, char **argv)
   if (env && *env)
     config.d2d_size = atoi(env);
 
-  env = getenv("BUDDY_RECV_DEPTH_FACTOR");
+  env = getenv("BUDDY_BUFCOUNT_REMOTE");
   if (env && *env)
-    config.recv_depth_factor = atoi(env);
+    config.bufcount_remote = atoi(env);
+
+  env = getenv("BUDDY_BUFCOUNT_LOCAL");
+  if (env && *env)
+    config.bufcount_local = atoi(env);
 
   config.h2d_size = h2d_size;
   config.d2h_size = d2h_size;

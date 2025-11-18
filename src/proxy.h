@@ -14,8 +14,8 @@ struct ProxyConfig {
   unsigned h2d_size = 0;
   unsigned d2h_size = 0;
   unsigned d2d_size = 32*1024;
-  unsigned d2d_depth = 32;
-  unsigned recv_depth_factor = 4;
+  unsigned bufcount_remote = 32;
+  unsigned bufcount_local = 8;
   double timeout = 10.0;
   double quiet_time = 1e-3;
 };
