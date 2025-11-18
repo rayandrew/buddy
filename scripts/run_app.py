@@ -323,21 +323,29 @@ def main():
         raise Exception('Cannot find hpctoolkit')
 
     if args.optimize:
-        fixed = {
-            'app': args.app,
-            'offload': args.offload,
-        }
-        opts = {
-            'bufsize_remote': [2**n for n in range(14, 25)],
-            'bufsize_local': [2**n for n in range(14, 25)],
-            'bufcount_proxy_remote': [2**n for n in range(0, 7)],
-            'bufcount_proxy_local': [2**n for n in range(0, 7)],
-            'bufcount_host': [2**n for n in range(0, 7)],
-            'threads_proxy': list(range(1, 8+1)),
-            'idle_timeout': [2**n for n in range(-10, 1)],
-        }
-        while optimize(fixed, opts, args.output) > 0:
-            if args.repeat == 0: break
+        params = [arg.split(',') for arg in (args.app, args.offload)]
+        progress = True
+
+        while progress:
+            progress = False
+            iters = itertools.product(*params)
+
+            for app, offload in iters:
+                fixed = {
+                    'app': app,
+                    'offload': offload,
+                }
+                opts = {
+                    'bufsize_remote': [2**n for n in range(14, 25)],
+                    'bufsize_local': [2**n for n in range(14, 25)],
+                    'bufcount_proxy_remote': [2**n for n in range(0, 7)],
+                    'bufcount_proxy_local': [2**n for n in range(0, 7)],
+                    'bufcount_host': [2**n for n in range(0, 7)],
+                    'threads_proxy': list(range(1, 8+1)),
+                    'idle_timeout': [2**n for n in range(-10, 1)],
+                }
+                if optimize(fixed, opts, args.output) > 0:
+                    progress = True
         return
 
     for i in range(args.repeat):
