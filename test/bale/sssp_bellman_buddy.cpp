@@ -20,6 +20,7 @@
 #include "sssp.h"
 #include "compat.h"
 #include "buddy_convey.h"
+#include "profile.h"
 
 /*!
  * \brief Relax the head of the edges delivered by a conveyor buffer
@@ -114,6 +115,8 @@ double sssp_bellman_buddy(d_array_t *dist, sparsemat_t *mat, int64_t v0)
 
   convey_t * conv = convey_new(SIZE_MAX, 0, NULL, 0);
   if(conv == NULL){return(-1);}
+
+  profile_start();
 
   double t1 = wall_seconds();
 
@@ -220,6 +223,9 @@ double sssp_bellman_buddy(d_array_t *dist, sparsemat_t *mat, int64_t v0)
   clear_d_array(tent1); free(tent1);
   clear_d_array(tent2); free(tent2);
   t1 = wall_seconds() - t1;
+
+  profile_stop();
+
   //minavgmaxD_t stat[1];
   //lgp_min_avg_max_d( stat, t1, THREADS );
   double sum;

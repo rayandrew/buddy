@@ -17,6 +17,7 @@
 #include <spmat.h>
 #include <std_options.h>
 #include "compat.h"
+#include "profile.h"
 
 //#include "alternates/transpose_matrix_alternates.h"
 
@@ -118,11 +119,15 @@ int main(int argc, char * argv[])
     }
 #endif
 
+    profile_start();
+
     t1 = wall_seconds();
     outmat = transpose_matrix_buddy(inmat);
     sprintf(model_str, "Buddy");
     t1 = wall_seconds() - t1;
     //lgp_min_avg_max_d( stat, t1, THREADS );
+
+    profile_stop();
 
     //bale_app_write_time(&args.std, model_str, stat->avg);
     bale_app_write_time(&args.std, model_str, t1);
