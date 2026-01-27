@@ -58,28 +58,39 @@ void Context::init()
       FAIL("ib setup failed");
   }
 
+  union ibv_gid gid;
+
+  struct ibv_device **dev_ptr = dev_list;
+  while (*dev_ptr) {
+    //printf("Found ib device: %s\n", ibv_get_device_name(*dev_ptr));
+
+    // Open an IB device context:
+    ctx = ibv_open_device(*dev_ptr);
+    if (!ctx)
+    {
+      fprintf(stderr, "Couldn't get context for %s.\n", ibv_get_device_name(*dev_ptr));
+      FAIL("ib setup failed");
+    }
+
+    memset(&gid, 0, sizeof(gid));
+    if (ibv_query_gid(ctx, IB_PORT, GID_INDEX, &gid)) {
+      //perror("Failed to query GID");
+
+      dev_ptr++;
+      ibv_close_device(ctx);
+    } else {
+      break;
+    }
+  }
+
   // Get an IB device:
-  if (!*dev_list)
+  if (!*dev_ptr)
   {
-      perror("No IB devices found.");
+      perror("No suitable IB device found.");
       FAIL("ib setup failed");
   }
 
-  /*
-  // Select last device (dpu specifc hack)
-  while (dev_list[1])
-      dev_list++;
-  */
-
-  //printf("using ib device %s\n", ibv_get_device_name(*dev_list));
-
-  // Open an IB device context:
-  ctx = ibv_open_device(*dev_list);
-  if (!ctx)
-  {
-    fprintf(stderr, "Couldn't get context for %s.\n", ibv_get_device_name(*dev_list));
-    FAIL("ib setup failed");
-  }
+  printf("Using ib device: %s\n", ibv_get_device_name(*dev_ptr));
 
   ibv_free_device_list(dev_list);
 
@@ -91,7 +102,6 @@ void Context::init()
     FAIL("ib setup failed");
   }
 
-  // Query IB port attribute
   memset(&port_info, 0, sizeof(port_info));
   if(ibv_query_port(ctx, IB_PORT, &port_info))
   {
@@ -99,13 +109,7 @@ void Context::init()
     FAIL("ib setup failed");
   }
 
-  union ibv_gid gid;
-  memset(&gid, 0, sizeof(gid));
-  if (ibv_query_gid(ctx, IB_PORT, GID_INDEX, &gid)) {
-    perror("Failed to query GID");
-    FAIL("ib setup failed");
-  }
-
+  /*
   // Query Device attribute
   struct ibv_device_attr device_attr;
   if (ibv_query_device(ctx, &device_attr))
@@ -113,11 +117,12 @@ void Context::init()
       perror("Failed to query IB device information.");
       FAIL("ib setup failed");
   }
-  /*else{
+  else{
       printf("The maximum number of QP = %d\n", device_attr.max_qp);
       printf("Largest contiguous block that can be registered %llu\n", device_attr.max_mr_size);
       printf("Maximum number of outstanding WR = %d\n", device_attr.max_qp_wr);
-  }*/
+  }
+  */
 
   local_dest_template = {};
 
