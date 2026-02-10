@@ -90,7 +90,7 @@ void Context::init()
       FAIL("ib setup failed");
   }
 
-  printf("Using ib device: %s\n", ibv_get_device_name(*dev_ptr));
+  // printf("Using ib device: %s\n", ibv_get_device_name(*dev_ptr));
 
   ibv_free_device_list(dev_list);
 

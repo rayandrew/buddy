@@ -512,10 +512,7 @@ void Proxy::post_recv(route rt)
     .num_sge    = 1,
   };
 
-  if (ibv_post_srq_recv(srq, &wr, &bad_wr)) {
-    perror("ibv_post_recv");
-    FAIL("failed to post recv");
-  }
+  CHECK_ERR(ibv_post_srq_recv(srq, &wr, &bad_wr));
 }
 
 bool Proxy::route_reqs(ReqBufRead &reader)
