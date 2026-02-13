@@ -385,6 +385,14 @@ void SizeHistogram::print()
   std::cout << std::endl;
 }
 
+uint64_t avg(uint64_t bytes, uint64_t count)
+{
+  if (count)
+    return bytes/count;
+  else
+    return 0;
+}
+
 void Proxy::print_counters()
 {
   rdma_counters in_total, out_total;
@@ -427,14 +435,10 @@ void Proxy::print_counters()
     std::cout << "---------------------" << std::endl;
 
     std::cout << "--- avg msg size ---" << std::endl;
-    if (in_total.count_local)
-      std::cout << "avg_in_local\t" << in_total.bytes_local/in_total.count_local << std::endl;
-    if (in_total.count_remote)
-      std::cout << "avg_in_remote\t" << in_total.bytes_remote/in_total.count_remote << std::endl;
-    if (out_total.count_local)
-      std::cout << "avg_out_local\t" << out_total.bytes_local/out_total.count_local << std::endl;
-    if (out_total.count_remote)
-      std::cout << "avg_out_remote\t" << out_total.bytes_remote/out_total.count_remote << std::endl;
+    std::cout << "avg_in_local\t" << avg(in_total.bytes_local, in_total.count_local) << std::endl;
+    std::cout << "avg_in_remote\t" << avg(in_total.bytes_remote, in_total.count_remote) << std::endl;
+    std::cout << "avg_out_local\t" << avg(out_total.bytes_local, out_total.count_local) << std::endl;
+    std::cout << "avg_out_remote\t" << avg(out_total.bytes_remote, out_total.count_remote) << std::endl;
     std::cout << "--------------------" << std::endl;
   }
 
