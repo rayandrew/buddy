@@ -1,0 +1,7 @@
+sm1-bf
+sm2-bf
+sm3-bf
+sm4-bf
+sm5-bf
+sm6-bf
+sm8-bf
