@@ -10,14 +10,14 @@ p = argparse.ArgumentParser()
 
 p.add_argument('output')
 
-p.add_argument('server_node')
-p.add_argument('server_dev')
-p.add_argument('server_numa')
-p.add_argument('client_node')
-p.add_argument('client_dev')
-p.add_argument('client_numa')
+# p.add_argument('server_node')
+# p.add_argument('server_dev')
+# p.add_argument('server_numa')
+# p.add_argument('client_node')
+# p.add_argument('client_dev')
+# p.add_argument('client_numa')
 
-args = p.parse_args()
+# args = p.parse_args()
 
 def run(args, cmd):
     def base_cmd(node, device, numa):
@@ -57,17 +57,56 @@ bw_index = ['bw_bytes', 'bw_iters', 'bw_peak', 'bw_avg', 'bw_rate']
 lat_args = ['-s', '1']
 bw_args = []
 
-lat_res = run(args, ['ib_send_lat'] + lat_args)
-bw_res = run(args, ['ib_send_bw'] + bw_args)
+def main(args):
+    lat_res = run(args, ['ib_send_lat'] + lat_args)
+    bw_res = run(args, ['ib_send_bw'] + bw_args)
 
-lat_data = parse_res(lat_res, lat_index)
-bw_data = parse_res(bw_res, bw_index)
+    lat_data = parse_res(lat_res, lat_index)
+    bw_data = parse_res(bw_res, bw_index)
 
-config = vars(args).copy()
-del config['output']
-config = pd.Series(config)
+    config = vars(args).copy()
+    del config['output']
+    config = pd.Series(config)
 
-row = pd.DataFrame([pd.concat([config, lat_data, bw_data])])
-with open(args.output, 'a') as out:
-    fresh = out.tell() == 0
-    row.to_csv(out, index=False, header=fresh)
+    row = pd.DataFrame([pd.concat([config, lat_data, bw_data])])
+    with open(args.output, 'a') as out:
+        fresh = out.tell() == 0
+        row.to_csv(out, index=False, header=fresh)
+
+for server in ('host', 'bf'):
+    for client in ('host', 'bf'):
+        for mode in ('intra', 'inter'):
+            server_node = 'sm2'
+            if server == 'bf':
+                server_node += '-bf'
+
+            client_node = 'sm3'
+            if mode == 'intra':
+                client_node = 'sm2'
+            if client == 'bf':
+                client_node += '-bf'
+
+            numa = {'host': ['0', '1'], 'bf': ['0']}
+            dev = {'host': ['mlx5_0', 'mlx5_2'], 'bf': ['mlx5_2']}
+
+            server_devs = dev[server]
+            server_numas = numa[server]
+
+            client_devs = dev[client]
+            client_numas = numa[client]
+
+            for sd in server_devs:
+                for sn in server_numas:
+                    for cd in client_devs:
+                        for cn in client_numas:
+                            a = p.parse_args()
+
+                            a.server_node = server_node
+                            a.server_dev = sd
+                            a.server_numa = sn
+
+                            a.client_node = client_node
+                            a.client_dev = cd
+                            a.client_numa = cn
+
+                            main(a)
