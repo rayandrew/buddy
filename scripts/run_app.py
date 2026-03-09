@@ -16,8 +16,21 @@ app_cmds = {
     'triangle':     'test/bale/triangle -n 1787345',
     'transpose':    'test/bale/transpose_matrix -n 1787345',
     'sssp':         'test/bale/sssp -n 1787345',
-    'qs':           'apps/qs/src/qs -i apps/qs/Examples/CTS2_Benchmark/CTS2-N5.inp -X 64 -Y 64 -Z 32 -x 64 -y 64 -z 32 -I 4 -J 4 -K 2 -n 1310720'
 }
+
+def make_app_cmd(config):
+    if config['app'] == 'qs':
+        i = 8
+        j = 6
+        k = config['nodes']
+
+        x = 16*i
+        y = 16*j
+        z = 16*k
+
+        return f'apps/qs/src/qs -i apps/qs/Examples/CTS2_Benchmark/CTS2-N5.inp -X {x} -Y {y} -Z {z} -x {x} -y {y} -z {z} -I {i} -J {j} -K {k} -n 1310720'
+    else:
+        return app_cmds[config['app']]
 
 def match_pat(s):
     pat = re.compile(s)

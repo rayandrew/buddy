@@ -12,12 +12,27 @@ import random
 
 app_cmds = {
     'mini_histo':   'test/histo 10000 100000 1',
-    'histo':        'test/histo 69905066 1000000 1',
+    'histo':        'test/histo 69905066 10000000 1',
     'triangle':     'test/bale/triangle -n 1787345',
     'transpose':    'test/bale/transpose_matrix -n 1787345',
     'sssp':         'test/bale/sssp -n 1787345',
-    'qs':           'apps/qs/src/qs -i apps/qs/Examples/CTS2_Benchmark/CTS2-N5.inp -X 64 -Y 64 -Z 32 -x 64 -y 64 -z 32 -I 4 -J 4 -K 2 -n 1310720'
 }
+
+def make_app_cmd(config):
+    if config['app'] == 'qs':
+        i = 8
+        j = 6
+        k = int(config['nodes'])
+
+        x = 16*i
+        y = 16*j
+        z = 16*k
+
+        n = i*j*k*40960
+
+        return f'apps/qs/src/qs -i apps/qs/Examples/CTS2_Benchmark/CTS2-N5.inp -X {x} -Y {y} -Z {z} -x {x} -y {y} -z {z} -I {i} -J {j} -K {k} -n {n}'
+    else:
+        return app_cmds[config['app']]
 
 def match_pat(s):
     pat = re.compile(s)
@@ -101,6 +116,8 @@ def run_trial(config, path, dry_run, profile, timeout='0'):
 
     ranks_per_node = 48
 
+    app = make_app_cmd(config)
+
     # Use exec to ensure that .kill() affects the mpirun and not just the shell
     # process, since we are using Popen(shell=True)
     # https://stackoverflow.com/a/13143013
@@ -121,7 +138,7 @@ def run_trial(config, path, dry_run, profile, timeout='0'):
         f'-npernode {ranks_per_node} '
         f'env BUDDY_SENDBUF={config["bufcount_host"]} BUDDY_RECVBUF={config["bufcount_host"]} BUDDY_BUFSIZE={config["bufsize_local"]} '
         f'{app_pre} numactl -N0 {profile} '
-        f'{app_dir}/{app_cmds[config["app"]]}')
+        f'{app_dir}/{app}')
 
     ret = 0
     if dry_run:
