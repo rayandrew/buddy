@@ -4,4 +4,5 @@ sm3-bf
 sm4-bf
 sm5-bf
 sm6-bf
+sm7-bf
 sm8-bf
