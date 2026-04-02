@@ -13,9 +13,9 @@ import random
 app_cmds = {
     'mini_histo':   'test/histo 10000 100000 1',
     'histo':        'test/histo 69905066 10000000 1',
-    'triangle':     'test/bale/triangle -n 1787345',
-    'transpose':    'test/bale/transpose_matrix -n 1787345',
-    'sssp':         'test/bale/sssp -n 1787345',
+    'triangle':     'test/bale/triangle -n 6355006',
+    'transpose':    'test/bale/transpose_matrix -n  6355006',
+    'sssp':         'test/bale/sssp -n 6355006',
 }
 
 def make_app_cmd(config):
@@ -127,7 +127,7 @@ def run_trial(config, path, dry_run, profile, timeout='0'):
 
     # Need to set prefix because BF-side OpenMPI is a different version
 
-    proxy_cmd = (f'exec timeout {timeout} '
+    proxy_cmd = (f'exec timeout -v {timeout} '
         f'mpirun -np {config["nodes"]} --hostfile {hosts} -npernode 1 '
         f'{mpi_prefix} '
         f'-bind-to none env '
@@ -445,7 +445,14 @@ def main():
                 'idle_timeout': float(idle_timeout) if idle_timeout else '',
             }
 
-            single_run(config, args.output, args.results_dir, dry_run=args.dry_run, profile=args.profile, record_error=args.record_errors)
+            try:
+                single_run(config, args.output, args.results_dir, dry_run=args.dry_run, profile=args.profile, record_error=args.record_errors)
+                print('ok')
+            except ChildCrashed:
+                if args.record_errors:
+                    print('error recorded')
+                else:
+                    raise
 
 if __name__ == '__main__':
     main()
