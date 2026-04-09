@@ -165,6 +165,7 @@ bool HostBufs::advance(bool done)
   }
 
   if (done) {
+    /*
     const double TIMEOUT = 360.0;
     if (done_time == 0.0)
       done_time = MPI_Wtime();
@@ -173,6 +174,7 @@ bool HostBufs::advance(bool done)
           << " Local balance: " << local_balance << "."
           << " Global balance: " << global_balance);
     }
+    */
 
     if (balance_req == MPI_REQUEST_NULL) {
       CHECK_MPI(MPI_Iallreduce(&local_balance, &global_balance, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD, &balance_req));

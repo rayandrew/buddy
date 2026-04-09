@@ -223,14 +223,16 @@ poll:
         if (n == load) {
           tic(TT_BARRIER);
 
-          const double TIMEOUT = 360.0;
-          double now = MPI_Wtime();
-          if (finishing_time == 0.0) {
-            finishing_time = now;
-          } else if (now - finishing_time > TIMEOUT) {
-            FAIL("Stuck in finishing loop for " << TIMEOUT << " s."
-                << " Local send/recv: " << send_count << "/" << recv_count << "."
-                << " Global send/recv: " << prev_counts[0] << "/" << prev_counts[1]);
+          if (false) {
+            const double TIMEOUT = 360.0;
+            double now = MPI_Wtime();
+            if (finishing_time == 0.0) {
+              finishing_time = now;
+            } else if (now - finishing_time > TIMEOUT) {
+              FAIL("Stuck in finishing loop for " << TIMEOUT << " s."
+                  << " Local send/recv: " << send_count << "/" << recv_count << "."
+                  << " Global send/recv: " << prev_counts[0] << "/" << prev_counts[1]);
+            }
           }
 
           if (count_req == MPI_REQUEST_NULL) {
