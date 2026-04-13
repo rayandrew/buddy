@@ -357,6 +357,7 @@ def main():
     p.add_argument('--sweep', action='store_true')
     p.add_argument('-E', '--record-errors', action='store_true')
     p.add_argument('--results-dir', default='app_results')
+    p.add_argument('--timelimit', default='10m')
 
     args = p.parse_args()
 
@@ -446,11 +447,12 @@ def main():
             }
 
             try:
-                single_run(config, args.output, args.results_dir, dry_run=args.dry_run, profile=args.profile, record_error=args.record_errors)
+                single_run(config, args.output, args.results_dir, dry_run=args.dry_run, profile=args.profile, record_error=args.record_errors, timeout=args.timelimit)
                 print('ok')
             except ChildCrashed:
                 if args.record_errors:
                     print('error recorded')
+                    time.sleep(5)
                 else:
                     raise
 
