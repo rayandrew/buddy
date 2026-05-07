@@ -3,3 +3,5 @@ build*/
 *.out
 *.data
 app_results/
+host.txt
+bf.txt
