@@ -9,19 +9,41 @@ import re
 import time
 import itertools
 import random
+import math
+
+LLC_BYTES_PER_SOCKET = 256*1024*1024
+CORES_PER_SOCKET = 48
+
+llc_per_core = LLC_BYTES_PER_SOCKET/CORES_PER_SOCKET
+histo_size = int(llc_per_core * (100/8))
+sparsemat_size = int(llc_per_core * (100/88))
 
 app_cmds = {
-    'mini_histo':   'test/histo 10000 100000 1',
-    'histo':        'test/histo 69905066 10000000 1',
-    'triangle':     'test/bale/triangle -n 6355006',
-    'transpose':    'test/bale/transpose_matrix -n  6355006',
-    'sssp':         'test/bale/sssp -n 6355006',
+    'mini_histo':   f'test/histo 10000 100000 1',
+    'histo':        f'test/histo {histo_size} 10000000 1',
+    'triangle':     f'test/bale/triangle -n {sparsemat_size}',
+    'transpose':    f'test/bale/transpose_matrix -n {sparsemat_size}',
+    'sssp':         f'test/bale/sssp -n {sparsemat_size}',
 }
+
+def factorize_closest(n: int) -> tuple[int, int]:
+    """
+    Factorize n into a * b = n where a and b are as close as possible.
+    Returns (a, b) with a <= b.
+    """
+    if n <= 0:
+        raise ValueError("n must be a positive integer")
+
+    # Start from floor(sqrt(n)) and search downward
+    for a in range(math.isqrt(n), 0, -1):
+        if n % a == 0:
+            b = n // a
+            return (a, b)
 
 def make_app_cmd(config):
     if config['app'] == 'qs':
-        i = 8
-        j = 6
+        # Ie 4,4 for 16 ranks and 8,6 for 48 ranks
+        j, i = factorize_closest(CORES_PER_SOCKET)
         k = int(config['nodes'])
 
         x = 16*i
