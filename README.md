@@ -1,6 +1,10 @@
+  
 # Buddy: communication offloading engine on DPU
 
-Two components:
+### Citation
+* Wahlgren, J., Hu, A., Pearce, R., Gokhale, M. and Peng, I., 2026. Communication Offloading on SmartNIC DPUs: A Quantitative Approach. In European Conference on Parallel Processing 2026 (EuroPar'26).
+
+### Main components:
 - `libbuddy.so`: The client library that interacts with the application. Its APIs are defined in `src/buddy.h`.
 - `buddy-proxy`: The DPU routing agent. It runs on BlueField smartNIC DPU or x86 platforms.
 
@@ -32,11 +36,9 @@ First, on the DPU, start the DPU agent:
 
     ./build-dpu/src/buddy-proxy 
 
-
 Then, on the host, start the program. For example,
 
     /build-host$ BUDDY_DPU=bf01 mpirun -np 16 ./test/histo 10000 1000000 1
-
 
 ## Configuration
 
@@ -54,3 +56,4 @@ This section lists environment variables that control Buddy.
   failing.
 - `BUDDY_QUIET_TIME`: Seconds to wait for additional messages to arrive before
   flushing buffers.
+
