@@ -57,6 +57,19 @@ Proxy::~Proxy()
     CHECK(!ibv_dereg_mr(d2d_mr));
     delete[] d2d_buf;
   }
+
+  if (landing_mr) {
+    char *landing_buf = (char *)landing_mr->addr;
+    CHECK(!ibv_dereg_mr(landing_mr));
+    delete[] landing_buf;
+  }
+
+  delete[] pending_reads;
+  delete[] peer_landing;
+  delete[] in_counters;
+  delete[] d2h_send;                 // ~SendBufs deregs each MR + frees its buffers
+  delete[] d2d_send;
+  delete[] last_thread_progress;
 }
 
 int get_num_threads()
