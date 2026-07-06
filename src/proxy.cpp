@@ -118,6 +118,18 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     d2d_mr = nullptr;
   }
 
+  // write mode: a separate landing region (peers RDMA_WRITE here); one disjoint sub-region of
+  // slots_per_peer slots per peer, mirroring each sender's per-thread bufcount buffers.
+  if (config.d2d_mode == D2D_WRITE && num_remotes) {
+    slots_per_peer = config.bufcount_remote * num_threads;
+    size_t total_landing = (size_t)config.d2d_size * slots_per_peer * num_remotes;
+    char *landing_buf = new char[total_landing];
+    landing_mr = ibv_reg_mr(rdma::Context::get().get_pd(), landing_buf, total_landing,
+        IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    CHECK(landing_mr);
+    peer_landing = new peer_land[num_remotes]();
+  }
+
   std::cout << "ranks:";
   for (unsigned i = 0; i < num_clients; i++)
     std::cout << " " << ranks[i];
@@ -130,6 +142,37 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     post_recv(route::make_remote(i));
 
   TRACE(1, "trace on");
+}
+
+// write mode startup: advertise our landing sub-region to each peer and collect theirs.
+void Proxy::d2d_write_exchange()
+{
+  for (unsigned i = 0; i < num_remotes; i++) {
+    d2d_desc adv = {
+      .addr = (uint64_t)((char *)landing_mr->addr + (uint64_t)i * slots_per_peer * config.d2d_size),
+      .id   = (uint64_t)(i * slots_per_peer),   // base slot for peer i
+      .rkey = landing_mr->rkey,
+      .len  = slots_per_peer,
+    };
+    remote_qps[i].send_imm_inline(IMM_D2D_MRINFO, &adv, sizeof(adv), 0, WRID_CTRL);
+  }
+
+  for (unsigned got = 0; got < num_remotes; ) {
+    ibv_wc wc;
+    int n = ibv_poll_cq(cqs.remote_recv, 1, &wc);
+    CHECK(n >= 0);
+    if (!n)
+      continue;
+    CHECK(wc.status == IBV_WC_SUCCESS);
+    CHECK((wc.imm_data & IMM_TAG_MASK) == IMM_D2D_MRINFO);
+    unsigned peer = remote_idx_of(wc.qp_num);
+    route rt = route::from_int(wc.wr_id);
+    d2d_desc adv;
+    memcpy(&adv, get_recv_buf(rt), sizeof(adv));
+    peer_landing[peer] = { adv.addr, adv.rkey, (uint32_t)adv.id, adv.len };
+    post_recv(rt);
+    got++;
+  }
 }
 
 unsigned Proxy::remote_idx_of(uint32_t qp_num)
@@ -237,7 +280,7 @@ bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
   CHECK(wc.opcode == IBV_WC_RECV || wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM);
   CHECK(wc.wc_flags & IBV_WC_WITH_IMM);
 
-  uint32_t imm_tag = wc.imm_data;
+  uint32_t imm_tag = wc.imm_data & IMM_TAG_MASK;   // IMM_D2D_WRITE packs a slot in the high bits
   switch (imm_tag) {
     case IMM_QUIT:
       {
@@ -310,6 +353,44 @@ bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
         break;
       }
 
+    case IMM_D2D_WRITE:
+      {
+        // write: data already landed in landing_mr[abs_slot]; the consumed recv slot is a dummy.
+        uint32_t abs_slot = wc.imm_data >> IMM_SLOT_SHIFT;
+        unsigned peer = remote_idx_of(wc.qp_num);
+        route recv_rt = route::from_int(wc.wr_id);
+        char *buf = (char *)landing_mr->addr + (uint64_t)abs_slot * config.d2d_size;
+        size_t msglen = wc.byte_len;
+        int tid = omp_get_thread_num();
+        in_counters[tid].count_remote++;
+        in_counters[tid].bytes_remote += msglen;
+        TRACE(1, "recv D2D_WRITE slot " << abs_slot << " size " << msglen << " peer " << peer);
+
+        ReqBufRead reader(buf, msglen);
+        if (route_reqs(reader, blocklist)) {
+          remote_qps[peer].send_imm_inline(IMM_D2D_CREDIT, &abs_slot, sizeof(abs_slot), 0, WRID_CTRL);
+          post_recv(recv_rt);
+        } else {
+          blocked_req br = {recv_rt, reader, omp_get_wtime() + config.timeout, true, peer, abs_slot};
+          blocklist.push_back(br);
+        }
+        break;
+      }
+
+    case IMM_D2D_CREDIT:
+      {
+        // write: peer freed a landing slot; free the matching send buffer.
+        route recv_rt = route::from_int(wc.wr_id);
+        uint32_t abs_slot;
+        memcpy(&abs_slot, get_recv_buf(recv_rt), sizeof(abs_slot));
+        unsigned peer = remote_idx_of(wc.qp_num);
+        unsigned s = abs_slot - peer_landing[peer].base_slot;
+        d2d_send[s / config.bufcount_remote].mark_complete(peer, s % config.bufcount_remote);
+        post_recv(recv_rt);
+        TRACE(1, "recv D2D_CREDIT slot " << abs_slot);
+        break;
+      }
+
     default:
       FAIL("unknown imm_tag for recv " << imm_tag);
       break;
@@ -321,6 +402,9 @@ bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
 void Proxy::rdma_loop()
 {
   quit_counter = 0;
+
+  if (config.d2d_mode == D2D_WRITE && num_remotes)
+    d2d_write_exchange();
 
   uint64_t max_blocked = 0;
   uint64_t quiet_flush_events = 0;
@@ -373,9 +457,15 @@ void Proxy::rdma_loop()
       auto req = blocklist.begin();
       while (req != blocklist.end()) {
         if (route_reqs(req->reqbuf, blocklist)) {
-          if (req->needs_ack)
-            remote_qps[req->ack_peer].send_imm_inline(IMM_D2D_ACK, &req->ack_id,
-                sizeof(req->ack_id), 0, WRID_CTRL);
+          if (req->needs_ack) {
+            if (config.d2d_mode == D2D_WRITE) {
+              uint32_t fs = (uint32_t)req->ack_id;
+              remote_qps[req->ack_peer].send_imm_inline(IMM_D2D_CREDIT, &fs, sizeof(fs), 0, WRID_CTRL);
+            } else {
+              remote_qps[req->ack_peer].send_imm_inline(IMM_D2D_ACK, &req->ack_id,
+                  sizeof(req->ack_id), 0, WRID_CTRL);
+            }
+          }
           post_recv(req->recv_rt);
           req = blocklist.erase(req);
         } else
@@ -670,15 +760,20 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
   send_buf_id id = {rt, (uint16_t)tid, (uint16_t)repid};
 
   TRACE(1, "send to remote " << idx << " size " << size << " thread " << tid);
+  char *buf = (char *)d2d_send[tid].mr()->addr + d2d_send[tid].offset(idx, repid);
   if (config.d2d_mode == D2D_READ) {
     // pull: advertise the buffer; it stays FLUSHING until the peer reads it and acks.
-    d2d_desc desc = {
-      .addr = (uint64_t)((char *)d2d_send[tid].mr()->addr + d2d_send[tid].offset(idx, repid)),
-      .id   = id.as_int(),
-      .rkey = d2d_send[tid].mr()->rkey,
-      .len  = (uint32_t)size,
-    };
+    d2d_desc desc = { .addr = (uint64_t)buf, .id = id.as_int(),
+        .rkey = d2d_send[tid].mr()->rkey, .len = (uint32_t)size };
     remote_qps[idx].send_imm_inline(IMM_D2D_READY, &desc, sizeof(desc), 0, WRID_CTRL);
+  } else if (config.d2d_mode == D2D_WRITE) {
+    // push one-sided into our dedicated landing slot; stays FLUSHING until CREDIT frees it.
+    unsigned s = tid * config.bufcount_remote + repid;
+    CHECK(s < peer_landing[idx].num_slots);
+    uint32_t abs_slot = peer_landing[idx].base_slot + s;
+    uint64_t raddr = peer_landing[idx].addr + (uint64_t)s * config.d2d_size;
+    remote_qps[idx].write_imm((abs_slot << IMM_SLOT_SHIFT) | IMM_D2D_WRITE,
+        buf, d2d_send[tid].mr(), size, raddr, peer_landing[idx].rkey, WRID_CTRL);
   } else {
     remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send[tid].mr(),
         size, d2d_send[tid].offset(idx, repid), id.as_int());

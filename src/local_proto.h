@@ -38,7 +38,13 @@ enum rdma_imm {
   IMM_D2D_RDMA,
   IMM_D2D_READY,   // pull: sender advertises a ready buffer (payload = d2d_desc)
   IMM_D2D_ACK,     // pull: reader signals read done (payload = d2d_desc.id)
+  IMM_D2D_MRINFO,  // write: receiver advertises its landing sub-region (payload = d2d_desc)
+  IMM_D2D_WRITE,   // write: one-sided data; imm = (abs_slot << 8) | IMM_D2D_WRITE
+  IMM_D2D_CREDIT,  // write: receiver frees a landing slot (payload = uint32 abs_slot)
 };
+// imm carries the tag in the low byte; IMM_D2D_WRITE packs the landing slot in the high bits.
+static const uint32_t IMM_TAG_MASK = 0xFF;
+static const unsigned IMM_SLOT_SHIFT = 8;
 
 // pull: reader RDMA_READs len bytes from (addr,rkey), then acks id to free the sender's buffer.
 struct d2d_desc {

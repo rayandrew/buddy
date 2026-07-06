@@ -261,6 +261,14 @@ class Proxy {
     struct pending_read { unsigned peer; uint64_t desc_id; uint32_t len; };
     pending_read *pending_reads = nullptr;
 
+    // write mode: peers RDMA_WRITE into landing_mr; each peer owns a disjoint sub-region so
+    // its slots never collide. peer_landing (from the MRINFO exchange) is where we write TO.
+    ibv_mr *landing_mr = nullptr;
+    struct peer_land { uint64_t addr; uint32_t rkey; uint32_t base_slot; uint32_t num_slots; };
+    peer_land *peer_landing = nullptr;   // [num_remotes]
+    unsigned slots_per_peer = 0;
+    void d2d_write_exchange();
+
     SendBufs *d2h_send;
     SendBufs *d2d_send;
     double *last_thread_progress;
