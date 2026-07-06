@@ -193,6 +193,14 @@ int main(int argc, char **argv)
   if (env && *env)
     config.bufcount_local = atoi(env);
 
+  env = getenv("BUDDY_D2D_MODE");   // send (push, default) | read (pull) | write (one-sided)
+  if (env && *env) {
+    if (!strcmp(env, "send"))       config.d2d_mode = buddy::dpu::D2D_SEND;
+    else if (!strcmp(env, "read"))  config.d2d_mode = buddy::dpu::D2D_READ;
+    else if (!strcmp(env, "write")) config.d2d_mode = buddy::dpu::D2D_WRITE;
+    else FAIL("BUDDY_D2D_MODE must be send|read|write, got " << env);
+  }
+
   config.h2d_size = h2d_size;
   config.d2h_size = d2h_size;
 

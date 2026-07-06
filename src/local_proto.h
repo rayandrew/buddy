@@ -36,6 +36,16 @@ enum rdma_imm {
   IMM_H2D_RDMA,
   IMM_D2H_RDMA,
   IMM_D2D_RDMA,
+  IMM_D2D_READY,   // pull: sender advertises a ready buffer (payload = d2d_desc)
+  IMM_D2D_ACK,     // pull: reader signals read done (payload = d2d_desc.id)
+};
+
+// pull: reader RDMA_READs len bytes from (addr,rkey), then acks id to free the sender's buffer.
+struct d2d_desc {
+  uint64_t addr;
+  uint64_t id;     // sender's send_buf_id (echoed back in the ack)
+  uint32_t rkey;
+  uint32_t len;
 };
 
 } // namespace buddy

@@ -9,6 +9,9 @@
 
 namespace buddy::dpu {
 
+// D2D transport mode (DPU<->DPU leg). See BUDDY_D2D_MODE.
+enum d2d_mode { D2D_SEND = 0, D2D_READ = 1, D2D_WRITE = 2 };
+
 struct ProxyConfig {
   unsigned trace = 0;
   unsigned h2d_size = 0;
@@ -18,6 +21,7 @@ struct ProxyConfig {
   unsigned bufcount_local = 2;
   double timeout = 60.0;
   double quiet_time = 1e-3;
+  unsigned d2d_mode = D2D_SEND;   // 0 send (push), 1 read (pull), 2 write (push, one-sided)
 };
 
 inline std::ostream& operator<<(std::ostream& os, const ProxyConfig& config)
@@ -28,6 +32,7 @@ inline std::ostream& operator<<(std::ostream& os, const ProxyConfig& config)
   os << "d2d_size " << config.d2d_size << std::endl;
   os << "timeout " << config.timeout << std::endl;
   os << "quiet_time " << config.quiet_time << std::endl;
+  os << "d2d_mode " << config.d2d_mode << std::endl;
   return os;
 }
 
@@ -218,6 +223,10 @@ struct blocked_req {
   route recv_rt;
   ReqBufRead reqbuf;
   double deadline;
+  // pull mode: a blocked read must ack its peer once drained (so the sender frees its buffer)
+  bool needs_ack = false;
+  unsigned ack_peer = 0;
+  uint64_t ack_id = 0;
 };
 
 class Proxy {
@@ -248,6 +257,10 @@ class Proxy {
     ibv_mr *d2d_mr;
     int *local_idx_to_rank;
 
+    // pull mode: one in-flight read per recv slot, so index by slot idx (no locking).
+    struct pending_read { unsigned peer; uint64_t desc_id; uint32_t len; };
+    pending_read *pending_reads = nullptr;
+
     SendBufs *d2h_send;
     SendBufs *d2d_send;
     double *last_thread_progress;
@@ -261,9 +274,12 @@ class Proxy {
     char *get_recv_buf(route rt);
 
     bool poll_recv_queue(std::list<blocked_req>& blocked_reqs);
-    void poll_send_queue();
+    void poll_send_queue(std::list<blocked_req>& blocked_reqs);
 
-    bool route_reqs(ReqBufRead& reader);
+    unsigned remote_idx_of(uint32_t qp_num);
+    void handle_read_complete(uint32_t slot, std::list<blocked_req>& blocked_reqs);
+
+    bool route_reqs(ReqBufRead& reader, std::list<blocked_req>& blocked_reqs);
     size_t flush_all();
     bool flush(route r, unsigned repid);
     bool flush_local(unsigned idx, unsigned repid);

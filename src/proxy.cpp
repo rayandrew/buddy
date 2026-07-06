@@ -41,6 +41,11 @@ static const char *tt_label[TT_COUNT] = {
 
 namespace buddy::dpu {
 
+// send-CQ wr_id tags. Flush wr_ids are send_buf_ids (top byte 0, repid is small), so these
+// reserved top bytes let poll_send_queue tell reads/control sends apart from flushes.
+static const uint64_t WRID_READ = 0xFFull << 56;   // low 32 bits = recv slot idx
+static const uint64_t WRID_CTRL = 0xFEull << 56;   // READY/ACK send; nothing to free
+
 Proxy::~Proxy()
 {
   char *h2d_buf = (char *)h2d_mr->addr;
@@ -90,6 +95,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   d2h_send = new SendBufs[num_threads];
   d2d_send = new SendBufs[num_threads];
   last_thread_progress = new double[num_threads];
+  pending_reads = new pending_read[d2d_depth + 1];
 
   for (int tid = 0; tid < num_threads; tid++) {
     new (&d2h_send[tid]) SendBufs(num_clients, config.bufcount_local, config.d2h_size);
@@ -126,7 +132,31 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   TRACE(1, "trace on");
 }
 
-void Proxy::poll_send_queue()
+unsigned Proxy::remote_idx_of(uint32_t qp_num)
+{
+  for (unsigned i = 0; i < num_remotes; i++)
+    if (remote_qps[i].get_qp()->qp_num == qp_num)
+      return i;
+  FAIL("unknown remote qp_num " << qp_num);
+}
+
+void Proxy::handle_read_complete(uint32_t slot, std::list<blocked_req>& blocklist)
+{
+  int tid = omp_get_thread_num();
+  auto &pr = pending_reads[slot];
+  route recv_rt = route::make_remote(slot);
+
+  in_counters[tid].count_remote++;
+  in_counters[tid].bytes_remote += pr.len;
+  TRACE(1, "read done slot " << slot << " size " << pr.len << " peer " << pr.peer);
+
+  // Route via the blocklist drain (which acks + reposts) to avoid recursing through route_reqs.
+  blocked_req br = {recv_rt, ReqBufRead(get_recv_buf(recv_rt), pr.len),
+      omp_get_wtime() + config.timeout, true, pr.peer, pr.desc_id};
+  blocklist.push_back(br);
+}
+
+void Proxy::poll_send_queue(std::list<blocked_req>& blocklist)
 {
   int thread_depth = rx_depth / num_threads;
   ibv_wc wc[thread_depth];
@@ -160,6 +190,14 @@ void Proxy::poll_send_queue()
       FAIL("recv completion in send queue");
 
     uint64_t wr_id = wc[i].wr_id;
+    uint8_t tag = wr_id >> 56;
+    if (tag == (WRID_CTRL >> 56))            // READY/ACK send done; nothing to free
+      continue;
+    if (tag == (WRID_READ >> 56)) {          // pull read completed
+      handle_read_complete((uint32_t)(wr_id & 0xFFFFFFFF), blocklist);
+      continue;
+    }
+
     auto id = send_buf_id::from_int(wr_id);
 
     auto send_bufs = &d2h_send[id.tid];
@@ -234,13 +272,41 @@ bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
         }
 
         ReqBufRead reader(recv_buf, msglen);
-        if (route_reqs(reader))
+        if (route_reqs(reader, blocklist))
           post_recv(recv_rt);
         else {
           blocked_req br = {recv_rt, reader, omp_get_wtime() + config.timeout};
           blocklist.push_back(br);
         }
 
+        break;
+      }
+
+    case IMM_D2D_READY:
+      {
+        // pull: descriptor landed in this recv slot; read the bulk into the same slot.
+        route recv_rt = route::from_int(wc.wr_id);
+        char *slotbuf = get_recv_buf(recv_rt);
+        d2d_desc desc;
+        memcpy(&desc, slotbuf, sizeof(desc));
+        unsigned peer = remote_idx_of(wc.qp_num);
+        pending_reads[recv_rt.idx] = { peer, desc.id, desc.len };
+        TRACE(1, "recv D2D_READY size " << desc.len << " peer " << peer);
+        remote_qps[peer].read(slotbuf, d2d_mr, desc.len, desc.addr, desc.rkey,
+            WRID_READ | recv_rt.idx);
+        break;
+      }
+
+    case IMM_D2D_ACK:
+      {
+        // pull: peer finished reading our buffer; free it and re-arm this slot.
+        route recv_rt = route::from_int(wc.wr_id);
+        uint64_t freed;
+        memcpy(&freed, get_recv_buf(recv_rt), sizeof(freed));
+        auto id = send_buf_id::from_int(freed);
+        d2d_send[id.tid].mark_complete(id.rt.idx, id.repid);
+        post_recv(recv_rt);
+        TRACE(1, "recv D2D_ACK free tid " << id.tid << " idx " << id.rt.idx);
         break;
       }
 
@@ -306,7 +372,10 @@ void Proxy::rdma_loop()
 
       auto req = blocklist.begin();
       while (req != blocklist.end()) {
-        if (route_reqs(req->reqbuf)) {
+        if (route_reqs(req->reqbuf, blocklist)) {
+          if (req->needs_ack)
+            remote_qps[req->ack_peer].send_imm_inline(IMM_D2D_ACK, &req->ack_id,
+                sizeof(req->ack_id), 0, WRID_CTRL);
           post_recv(req->recv_rt);
           req = blocklist.erase(req);
         } else
@@ -319,7 +388,7 @@ void Proxy::rdma_loop()
             << " Length of blocklist is " << blocklist.size() << ".");
       }
 
-      poll_send_queue();
+      poll_send_queue(blocklist);
     }
 
     toc(TT_RDMALOOP);
@@ -519,7 +588,7 @@ void Proxy::post_recv(route rt)
   CHECK_ERR(ibv_post_srq_recv(srq, &wr, &bad_wr));
 }
 
-bool Proxy::route_reqs(ReqBufRead &reader)
+bool Proxy::route_reqs(ReqBufRead &reader, std::list<blocked_req>& blocklist)
 {
   tic(TT_ROUTE);
 
@@ -563,7 +632,7 @@ bool Proxy::route_reqs(ReqBufRead &reader)
         else
           TRACE(2, "failed route to " << head->dst << " (local " << r.idx << ")");
 
-      poll_send_queue();
+      poll_send_queue(blocklist);
       complete = false;
       break;
     }
@@ -601,8 +670,19 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
   send_buf_id id = {rt, (uint16_t)tid, (uint16_t)repid};
 
   TRACE(1, "send to remote " << idx << " size " << size << " thread " << tid);
-  remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send[tid].mr(),
-      size, d2d_send[tid].offset(idx, repid), id.as_int());
+  if (config.d2d_mode == D2D_READ) {
+    // pull: advertise the buffer; it stays FLUSHING until the peer reads it and acks.
+    d2d_desc desc = {
+      .addr = (uint64_t)((char *)d2d_send[tid].mr()->addr + d2d_send[tid].offset(idx, repid)),
+      .id   = id.as_int(),
+      .rkey = d2d_send[tid].mr()->rkey,
+      .len  = (uint32_t)size,
+    };
+    remote_qps[idx].send_imm_inline(IMM_D2D_READY, &desc, sizeof(desc), 0, WRID_CTRL);
+  } else {
+    remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send[tid].mr(),
+        size, d2d_send[tid].offset(idx, repid), id.as_int());
+  }
 
   toc(TT_REMFLUSH);
 
@@ -665,7 +745,9 @@ SendBufs::SendBufs(unsigned n, unsigned m, unsigned size)
 
   reqbufs = new ReqBufWrite[n*m];
   char *buf = new char[n*m*size];
-  mr_ = ibv_reg_mr(rdma::Context::get().get_pd(), buf, n*m*size, IBV_ACCESS_LOCAL_WRITE);
+  // REMOTE_READ so the peer DPU can pull from d2d_send buffers in pull mode.
+  mr_ = ibv_reg_mr(rdma::Context::get().get_pd(), buf, n*m*size,
+      IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ);
   CHECK_ERRNO(mr_);
 
   for (unsigned i = 0; i < n; i++)

@@ -55,7 +55,7 @@ class QP {
       write_imm(tag, NULL, NULL, 0, 0, 0, 0);
     }
     void write(void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey);
-    void read(void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey);
+    void read(void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey, uint64_t wr_id = 0);
     void recv(ibv_mr *mr, unsigned len, unsigned offset = 0, uint64_t wr_id = 0);
 
     void post_rdma_recv();

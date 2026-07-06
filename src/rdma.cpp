@@ -220,6 +220,7 @@ void QP::setup_common(ibv_srq *srq, int connfd, bool inverse_server)
                     .max_recv_wr = COUNT,
                     .max_send_sge = 1,
                     .max_recv_sge = 1,
+                    .max_inline_data = 256,   // inline the small pull descriptors/acks
             },
             .qp_type = IBV_QPT_RC,
     };
@@ -507,6 +508,29 @@ void QP::write_imm(uint32_t tag, void *buf, ibv_mr *mr, unsigned len, uint64_t r
   if (ibv_post_send(qp, &wr, &bad_wr)) {
     FAIL("Failed to ibv_post_send");
   }
+}
+
+// One-sided RDMA READ into local buf; completion lands on the send CQ tagged with wr_id.
+void QP::read(void *buf, ibv_mr *mr, unsigned len, uint64_t remote_addr, uint32_t rkey, uint64_t wr_id)
+{
+  struct ibv_sge list = {
+    .addr   = (uint64_t) buf,
+    .length = (uint32_t) len,
+    .lkey   = mr->lkey,
+  };
+
+  struct ibv_send_wr wr = {
+    .wr_id = wr_id,
+    .sg_list = &list,
+    .num_sge = 1,
+    .opcode = IBV_WR_RDMA_READ,
+    .send_flags = IBV_SEND_SIGNALED,
+    .wr = { .rdma = { .remote_addr = remote_addr, .rkey = rkey } },
+  };
+
+  struct ibv_send_wr *bad_wr;
+  if (ibv_post_send(qp, &wr, &bad_wr))
+    FAIL("Failed to ibv_post_send (read)");
 }
 
 } // namespace buddy::rdma
