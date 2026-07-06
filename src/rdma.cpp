@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <cassert>
+#include <cstdlib>
 #include "rdma.h"
 #include "util.h"
 #include "sockets.h"
@@ -207,6 +208,17 @@ QP::QP(server_cqs cqs, int connfd, bool inverse_server)
   setup_common(cqs.srq, connfd, inverse_server);
 }
 
+// Outstanding RDMA reads per QP (BUDDY_RD_ATOMIC). Default 1 = Buddy baseline (serializes
+// reads); raise it (up to the mlx5 cap ~16) as a tuning knob to pipeline pull-read.
+static uint8_t rd_atomic_depth()
+{
+  const char *e = getenv("BUDDY_RD_ATOMIC");
+  int v = (e && *e) ? atoi(e) : 1;
+  if (v < 1) v = 1;
+  if (v > 16) v = 16;
+  return (uint8_t)v;
+}
+
 void QP::setup_common(ibv_srq *srq, int connfd, bool inverse_server)
 {
   // Creates a Queue Pair:
@@ -269,7 +281,7 @@ void QP::setup_common(ibv_srq *srq, int connfd, bool inverse_server)
   qp_attr.path_mtu		= MTU;
   qp_attr.dest_qp_num	= remote_dest.qpn;
   qp_attr.rq_psn			= remote_dest.psn;
-  qp_attr.max_dest_rd_atomic	= 1;
+  qp_attr.max_dest_rd_atomic	= rd_atomic_depth();
   qp_attr.min_rnr_timer		    = 12;
 
 #if 0
@@ -301,7 +313,7 @@ void QP::setup_common(ibv_srq *srq, int connfd, bool inverse_server)
   qp_attr.rnr_retry	    = 7;
   //qp_attr.rnr_retry	    = 0;
   qp_attr.sq_psn	      = local_dest.psn;
-  qp_attr.max_rd_atomic = 1;
+  qp_attr.max_rd_atomic = rd_atomic_depth();
   if (ibv_modify_qp(qp, &qp_attr, IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
                                   IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC))
   {
