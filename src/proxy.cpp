@@ -91,6 +91,9 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 #ifdef LOCAL_DMA
     dma::Engine *dma_engine,
 #endif
+#ifdef DOCA_FABRIC
+    rdma::DocaRdma *doca_fabric, char *fabric_mem,
+#endif
     int *ranks, route *routing_table)
   : config(config)
   , num_clients(num_clients)
@@ -102,7 +105,13 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 #ifdef LOCAL_DMA
   , dma_engine(dma_engine)
 #endif
+#ifdef DOCA_FABRIC
+  , doca_fabric(doca_fabric)
+  , fabric_mem(fabric_mem)
+  , num_threads(1)                     // one doca_rdma progress engine
+#else
   , num_threads(get_num_threads())
+#endif
   , h2d_depth(config.bufcount_local*num_clients*num_threads)
   , d2d_depth(config.bufcount_remote*num_remotes*num_threads)
   , rx_depth(h2d_depth + d2d_depth)
@@ -154,11 +163,15 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     std::cout << " " << ranks[i];
   std::cout << std::endl;
 
+#ifdef DOCA_FABRIC
+  fabric_stage = (size_t)d2d_depth * config.d2d_size;   // recv half starts here
+#endif
+
   for (uint32_t i = 0; i < h2d_depth; i++)
     post_recv(route::make_local(i));
 
   for (uint32_t i = 0; i < d2d_depth; i++)
-    post_recv(route::make_remote(i));
+    post_recv(route::make_remote(i));                    // -> fabric under DOCA_FABRIC
 
   TRACE(1, "trace on");
 }
@@ -219,6 +232,33 @@ void Proxy::dma_xfer(unsigned client, uint32_t offset, uint32_t len, dma::direct
   dma_engine->transfer(w, {client, offset, len, dir});
   dma::jobspec done;
   while (!dma_engine->poll(w, &done)) {}
+}
+#endif
+
+#ifdef DOCA_FABRIC
+// Drain doca_rdma D2D completions: free sent buffers, route received ones.
+void Proxy::fabric_poll(std::list<blocked_req>& blocklist)
+{
+  rdma::DocaRdma::completion c;
+  while (doca_fabric->poll(&c)) {
+    if (!c.is_recv) {                             // our send finished -> free the d2d buffer
+      auto id = send_buf_id::from_int(c.wr_id);
+      d2d_send[id.tid].mark_complete(id.rt.idx, id.repid);
+    } else {                                       // received into recv-half slot c.wr_id
+      int tid = omp_get_thread_num();
+      in_counters[tid].count_remote++;
+      in_counters[tid].bytes_remote += c.len;
+      TRACE(1, "recv D2D_FABRIC size " << c.len << " slot " << c.wr_id);
+      route recv_rt = route::make_remote(c.wr_id);
+      ReqBufRead reader(fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, c.len);
+      if (route_reqs(reader, blocklist))
+        post_recv(recv_rt);
+      else {
+        blocked_req br = {recv_rt, reader, omp_get_wtime() + config.timeout};
+        blocklist.push_back(br);
+      }
+    }
+  }
 }
 #endif
 
@@ -543,6 +583,9 @@ void Proxy::rdma_loop()
       }
 
       poll_send_queue(blocklist);
+#ifdef DOCA_FABRIC
+      fabric_poll(blocklist);
+#endif
     }
 
     toc(TT_RDMALOOP);
@@ -704,6 +747,12 @@ char *Proxy::get_recv_buf(route rt)
 
 void Proxy::post_recv(route rt)
 {
+#ifdef DOCA_FABRIC
+  if (rt.remote) {                     // D2D recvs land in the fabric recv half
+    doca_fabric->post_recv(fabric_stage + (size_t)rt.idx*config.d2d_size, config.d2d_size, rt.idx);
+    return;
+  }
+#endif
   assert(rt.idx < rx_depth);
 
   uint32_t len;
@@ -825,6 +874,12 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
 
   TRACE(1, "send to remote " << idx << " size " << size << " thread " << tid);
   char *buf = (char *)d2d_send[tid].mr()->addr + d2d_send[tid].offset(idx, repid);
+#ifdef DOCA_FABRIC
+  // all-DOCA: stage into the send half and send over doca_rdma; freed on send completion.
+  size_t send_off = (size_t)(idx * config.bufcount_remote + repid) * config.d2d_size;
+  memcpy(fabric_mem + send_off, buf, size);
+  doca_fabric->send_imm(idx, IMM_D2D_RDMA, send_off, size, id.as_int());
+#else
   if (config.d2d_mode == D2D_READ) {
     // pull: advertise the buffer; it stays FLUSHING until the peer reads it and acks.
     d2d_desc desc = { .addr = (uint64_t)buf, .id = id.as_int(),
@@ -842,6 +897,7 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
     remote_qps[idx].send_imm(IMM_D2D_RDMA, d2d_send[tid].mr(),
         size, d2d_send[tid].offset(idx, repid), id.as_int());
   }
+#endif
 
   toc(TT_REMFLUSH);
 

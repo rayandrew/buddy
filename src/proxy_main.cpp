@@ -132,7 +132,12 @@ int main(int argc, char **argv)
 
   // Assumption: ranks on same node are adjacent
   // Connect all DPU pairs
+#ifdef DOCA_FABRIC
+  int *rsock = new int[num_remotes]; bool *rsrv = new bool[num_remotes];   // deferred to DocaRdma
+  buddy::rdma::QP *remote_qps = nullptr;
+#else
   auto remote_qps = new buddy::rdma::QP[num_remotes];
+#endif
 
   int local_node = local_min / local_size;
   for (int node = 0; node < local_node; node++) {
@@ -141,8 +146,12 @@ int main(int argc, char **argv)
     buddy::full_write(socket, (char *)&local_node, sizeof(local_node));
     buddy::full_write(socket, (char *)&node, sizeof(node));
 
+#ifdef DOCA_FABRIC
+    rsock[node] = socket; rsrv[node] = false;
+#else
     new (&remote_qps[node]) buddy::rdma::QP(remote_cqs, socket, false);
     close(socket);
+#endif
   }
 
   for (int i = 0; i < num_remotes - local_node; i++) {
@@ -155,8 +164,12 @@ int main(int argc, char **argv)
     CHECK(to_node == local_node);
     CHECK(from_node > local_node);
 
+#ifdef DOCA_FABRIC
+    rsock[from_node-1] = socket; rsrv[from_node-1] = true;
+#else
     new (&remote_qps[from_node-1]) buddy::rdma::QP(remote_cqs, socket, true);
     close(socket);
+#endif
   }
 
   close(remote_lsock);
@@ -211,6 +224,16 @@ int main(int argc, char **argv)
     std::cout << "===================" << std::endl;
   }
 
+#ifdef DOCA_FABRIC
+  // D2D over doca_rdma. fabric_mem = send half | recv half; one slot per (remote,repid), 1 thread.
+  size_t fabric_slots = (size_t)config.bufcount_remote * num_remotes;
+  size_t fabric_len = 2 * fabric_slots * config.d2d_size;
+  char *fabric_mem = new char[fabric_len];
+  buddy::rdma::DocaRdma doca_fabric(num_remotes, fabric_mem, fabric_len);
+  for (int i = 0; i < num_remotes; i++) { doca_fabric.connect(i, rsock[i], rsrv[i]); close(rsock[i]); }
+  doca_fabric.wait_connected();
+#endif
+
   buddy::dpu::proxy_cqs cqs = {
     .local_srq = local_cqs.srq,
     .remote_srq = remote_cqs.srq,
@@ -223,6 +246,9 @@ int main(int argc, char **argv)
       local_qps, remote_qps,
 #ifdef LOCAL_DMA
       &dma_engine,
+#endif
+#ifdef DOCA_FABRIC
+      &doca_fabric, fabric_mem,
 #endif
       ranks, routing_table);
 

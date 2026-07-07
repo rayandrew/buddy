@@ -9,6 +9,9 @@
 #ifdef LOCAL_DMA
 #include "dma.h"
 #endif
+#ifdef DOCA_FABRIC
+#include "rdma_doca.h"
+#endif
 
 namespace buddy::dpu {
 
@@ -240,6 +243,9 @@ class Proxy {
 #ifdef LOCAL_DMA
         dma::Engine *dma_engine,
 #endif
+#ifdef DOCA_FABRIC
+        rdma::DocaRdma *doca_fabric, char *fabric_mem,
+#endif
         int *ranks, route *routing_table);
     ~Proxy();
     void rdma_loop();
@@ -257,6 +263,14 @@ class Proxy {
     dma::Engine *dma_engine;           // proxy runs single-threaded under LOCAL_DMA (no lock)
     unsigned local_idx_of(uint32_t qp_num);
     void dma_xfer(unsigned client, uint32_t offset, uint32_t len, dma::direction dir);
+#endif
+#ifdef DOCA_FABRIC
+    // D2D over doca_rdma. Aggregated buffers are staged into fabric_mem (send half | recv half),
+    // one send slot / recv slot per (remote, repid). Proxy is single-threaded (one doca_rdma pe).
+    rdma::DocaRdma *doca_fabric;
+    char *fabric_mem;
+    size_t fabric_stage;               // bytes in each half = fabric slots * d2d_size
+    void fabric_poll(std::list<blocked_req>& blocked_reqs);
 #endif
 
     const int num_threads;
