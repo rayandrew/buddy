@@ -10,7 +10,7 @@
 #define CHECK(a) do { if (!(a)) FAIL("check " #a); } while (0)
 #define CHECK_ERRNO(a) do { if (!(a)) FAIL("check " #a " [errno=" << strerror(errno) << "]"); } while (0)
 #define CHECK_ERR(a) do { int err = (a); if (err != 0) FAIL("check " #a " [error=" << strerror(err) << "]"); } while (0)
-#define CHECK_DOCA(a) do { doca_error_t _err = a; if (_err != DOCA_SUCCESS) FAIL("doca " << doca_get_error_string(_err)); } while (0)
+#define CHECK_DOCA(a) do { doca_error_t _err = a; if (_err != DOCA_SUCCESS) FAIL("doca " << doca_error_get_descr(_err)); } while (0)
 #define CHECK_EQ(a, b) do { if ((a) != (b)) FAIL("check equal (" #a "; " #b ") i.e. (" << a << "; " << b << ")"); } while (0)
 #define WARN_EQ(a, b) do { if ((a) != (b)) WARN("check equal (" #a "; " #b ") i.e. (" << a << "; " << b << ")"); } while (0)
 
