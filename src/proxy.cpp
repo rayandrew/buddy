@@ -47,6 +47,17 @@ static const uint64_t WRID_READ = 0xFFull << 56;   // low 32 bits = recv slot id
 static const uint64_t WRID_CTRL = 0xFEull << 56;   // READY/ACK send; nothing to free
 static const uint64_t FABRIC_CTRL = ~0ull;         // doca_rdma READY/ACK send; skip on completion
 
+#ifdef LOCAL_DMA
+static const size_t DMA_CTRL_LEN = 64;             // local recv buffer holds only an 8B size
+static unsigned dma_slots(size_t region, size_t slot)
+{
+  unsigned n = slot ? (unsigned)(region / slot) : 1;
+  if (n < 1) n = 1;
+  if (n > DMA_MAX_SLOTS) n = DMA_MAX_SLOTS;
+  return n;
+}
+#endif
+
 Proxy::~Proxy()
 {
   char *h2d_buf = (char *)h2d_mr->addr;
@@ -110,12 +121,23 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   , doca_fabric(doca_fabric)
   , fabric_mem(fabric_mem)
   , num_threads(1)                     // one doca_rdma progress engine
+#elif defined(LOCAL_DMA)
+  , num_threads(1)                     // single owner of the shared D2H staging ring
 #else
   , num_threads(get_num_threads())
 #endif
+#ifdef LOCAL_DMA
+  // one local recv per possible in-flight H2D_DMA + D2H_CREDIT (both host->proxy control sends)
+  , h2d_depth(dma_slots(DMA_SIZE_SEND, config.h2d_size) + dma_slots(DMA_SIZE_RECV, config.d2h_size))
+  , d2d_depth(config.bufcount_remote*num_remotes*num_threads)
+  , rx_depth(h2d_depth + d2d_depth)
+  , local_recv_len(DMA_CTRL_LEN)
+#else
   , h2d_depth(config.bufcount_local*num_clients*num_threads)
   , d2d_depth(config.bufcount_remote*num_remotes*num_threads)
   , rx_depth(h2d_depth + d2d_depth)
+  , local_recv_len(config.h2d_size)
+#endif
   , local_idx_to_rank(ranks)
   , routing_table(routing_table)
 {
@@ -131,7 +153,15 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     new (&d2d_send[tid]) SendBufs(num_remotes, config.bufcount_remote, config.d2d_size);
   }
 
-  size_t total_size_h2d = config.h2d_size * h2d_depth;
+#ifdef LOCAL_DMA
+  // proxy owns the host RECV (D2H) staging ring; slots freed by IMM_D2H_CREDIT.
+  dma_wsend = dma_slots(DMA_SIZE_SEND, config.h2d_size);
+  dma_wrecv = dma_slots(DMA_SIZE_RECV, config.d2h_size);
+  for (unsigned s = 0; s < dma_wrecv; s++)
+    dma_recv_free.push_back(s);
+#endif
+
+  size_t total_size_h2d = local_recv_len * h2d_depth;
   CHECK(total_size_h2d);
   char *h2d_buf = new char[total_size_h2d];
   h2d_mr = ibv_reg_mr(rdma::Context::get().get_pd(), h2d_buf, total_size_h2d, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
@@ -537,24 +567,37 @@ bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
 #ifdef LOCAL_DMA
     case IMM_H2D_DMA:
       {
-        // local DMA: control carries len; pull the host SEND staging, then route it.
+        // local DMA: control carries (slot,len); pull that host SEND slot, ACK it (staging drained,
+        // independent of routing), then route. slot offset lets many H2D transfers stay in flight.
         route recv_rt = route::from_int(wc.wr_id);
         unsigned client = local_idx_of(wc.qp_num);
+        unsigned slot = wc.imm_data >> IMM_SLOT_SHIFT;
         uint64_t len;
         memcpy(&len, get_recv_buf(recv_rt), sizeof(len));
         int tid = omp_get_thread_num();
-        dma_xfer(client, DMA_OFFSET_SEND, (uint32_t)len, dma::H2D);
+        uint32_t off = DMA_OFFSET_SEND + slot * (uint32_t)config.h2d_size;
+        dma_xfer(client, off, (uint32_t)len, dma::H2D);
+        // ACK now: the DMA drained the host SEND slot, regardless of whether routing blocks.
+        local_qps[client].send_imm_inline((slot << IMM_SLOT_SHIFT) | IMM_H2D_ACK, nullptr, 0, 0, WRID_CTRL);
         in_counters[tid].count_local++;
         in_counters[tid].bytes_local += len;
-        TRACE(1, "recv H2D_DMA size " << len << " client " << client);
+        TRACE(1, "recv H2D_DMA slot " << slot << " size " << len << " client " << client);
 
-        ReqBufRead reader(dma_engine->client_buf(client) + DMA_OFFSET_SEND, len);
+        ReqBufRead reader(dma_engine->client_buf(client) + off, len);
         if (route_reqs(reader, blocklist))
           post_recv(recv_rt);
         else {
           blocked_req br = {recv_rt, reader, omp_get_wtime() + config.timeout};
           blocklist.push_back(br);
         }
+        break;
+      }
+    case IMM_D2H_CREDIT:
+      {
+        // host copied a RECV slot out -> return it to the D2H ring.
+        route recv_rt = route::from_int(wc.wr_id);
+        dma_recv_free.push_back(wc.imm_data >> IMM_SLOT_SHIFT);
+        post_recv(recv_rt);
         break;
       }
 #endif
@@ -580,7 +623,7 @@ void Proxy::rdma_loop()
   uint64_t quiet_flush_events = 0;
   uint64_t quiet_flush_bufs = 0;
 
-#pragma omp parallel reduction(max:max_blocked) reduction(+:quiet_flush_events,quiet_flush_bufs)
+#pragma omp parallel num_threads(num_threads) reduction(max:max_blocked) reduction(+:quiet_flush_events,quiet_flush_bufs)
   {
     int tid = omp_get_thread_num();
     last_thread_progress[tid] = omp_get_wtime();
@@ -809,7 +852,7 @@ char *Proxy::get_recv_buf(route rt)
     len = config.d2d_size;
   } else {
     mr = h2d_mr;
-    len = config.h2d_size;
+    len = local_recv_len;
   }
 
   char *buf = (char *)mr->addr + rt.idx * len;
@@ -840,7 +883,7 @@ void Proxy::post_recv(route rt)
     assert(rt.idx < h2d_depth);
 
     lkey = h2d_mr->lkey;
-    len = config.h2d_size;
+    len = local_recv_len;
     srq = cqs.local_srq;
   }
 
@@ -994,6 +1037,11 @@ bool Proxy::flush_local(unsigned idx, unsigned repid)
   if (d2h_send[tid].reqs(idx, repid).empty())
     return false;
 
+#ifdef LOCAL_DMA
+  if (dma_recv_free.empty())     // no host RECV slot free; backpressure, retry after a credit
+    return false;
+#endif
+
   tic(TT_LOCFLUSH);
 
   d2h_send[tid].mark_flushing(idx, repid);
@@ -1004,13 +1052,16 @@ bool Proxy::flush_local(unsigned idx, unsigned repid)
 
   TRACE(1, "send to local rank " << local_idx_to_rank[idx] << " (idx " << idx << ")" << " size " << size << " thread " << tid);
 #ifdef LOCAL_DMA
-  // push aggregated data into the host RECV staging via DMA, then notify the size.
-  memcpy(dma_engine->client_buf(idx) + DMA_OFFSET_RECV,
+  // push aggregated data into a free host RECV slot via DMA, then notify (slot,size). The slot
+  // stays busy until the host copies it out and returns IMM_D2H_CREDIT.
+  unsigned s = dma_recv_free.back(); dma_recv_free.pop_back();
+  uint32_t off = DMA_OFFSET_RECV + s * (uint32_t)config.d2h_size;
+  memcpy(dma_engine->client_buf(idx) + off,
       (char *)d2h_send[tid].mr()->addr + d2h_send[tid].offset(idx, repid), size);
-  dma_xfer(idx, DMA_OFFSET_RECV, (uint32_t)size, dma::D2H);
+  dma_xfer(idx, off, (uint32_t)size, dma::D2H);
   uint64_t sz = size;
-  local_qps[idx].send_imm_inline(IMM_D2H_DMA, (char *)&sz, sizeof(sz), 0, WRID_CTRL);
-  d2h_send[tid].mark_complete(idx, repid);       // no send completion frees it in DMA mode
+  local_qps[idx].send_imm_inline((s << IMM_SLOT_SHIFT) | IMM_D2H_DMA, (char *)&sz, sizeof(sz), 0, WRID_CTRL);
+  d2h_send[tid].mark_complete(idx, repid);       // aggregation buffer is free once staged (data DMA'd)
 #else
   local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_send[tid].mr(), size,
       d2h_send[tid].offset(idx, repid), id.as_int());

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <list>
+#include <vector>
 
 #include "rdma.h"
 #include "request.h"
@@ -263,6 +264,9 @@ class Proxy {
     dma::Engine *dma_engine;           // proxy runs single-threaded under LOCAL_DMA (no lock)
     unsigned local_idx_of(uint32_t qp_num);
     void dma_xfer(unsigned client, uint32_t offset, uint32_t len, dma::direction dir);
+    // windowed staging: SEND/RECV sliced into slots; the proxy owns the RECV (D2H) slot ring.
+    unsigned dma_wsend, dma_wrecv;
+    std::vector<uint32_t> dma_recv_free;
 #endif
 #ifdef DOCA_FABRIC
     // D2D over doca_rdma. Aggregated buffers are staged into fabric_mem (send half | recv half),
@@ -280,6 +284,7 @@ class Proxy {
     const size_t h2d_depth;
     const size_t d2d_depth;
     const size_t rx_depth;
+    const size_t local_recv_len;   // local recv buffer size: h2d_size, or a tiny ctrl slot under LOCAL_DMA
 
     ibv_mr *h2d_mr;
     ibv_mr *d2d_mr;

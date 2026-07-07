@@ -41,10 +41,17 @@ enum rdma_imm {
   IMM_D2D_MRINFO,  // write: receiver advertises its landing sub-region (payload = d2d_desc)
   IMM_D2D_WRITE,   // write: one-sided data; imm = (abs_slot << 8) | IMM_D2D_WRITE
   IMM_D2D_CREDIT,  // write: receiver frees a landing slot (payload = uint32 abs_slot)
+  IMM_H2D_ACK,     // local DMA: proxy drained the host SEND slot (imm = slot<<8 | tag)
+  IMM_D2H_CREDIT,  // local DMA: host copied the RECV slot out, proxy may reuse it (imm = slot<<8)
 };
-// imm carries the tag in the low byte; IMM_D2D_WRITE packs the landing slot in the high bits.
+// imm carries the tag in the low byte; slot-carrying tags pack the slot in the high bits.
 static const uint32_t IMM_TAG_MASK = 0xFF;
 static const unsigned IMM_SLOT_SHIFT = 8;
+
+// local DMA windowed staging: the 64 MB SEND/RECV regions are sliced into fixed-size slots
+// (slot = g_max_send / g_min_recv), capped so slot indices fit the imm high bits and the
+// control recv pools stay small. A slot is busy from producer stage until consumer credit.
+static const unsigned DMA_MAX_SLOTS = 256;
 
 // pull: reader RDMA_READs len bytes from (addr,rkey), then acks id to free the sender's buffer.
 struct d2d_desc {

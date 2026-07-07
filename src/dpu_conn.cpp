@@ -149,8 +149,8 @@ DpuConn::~DpuConn()
   CHECK_MPI(MPI_Barrier(world_comm));
   qp.write_imm(IMM_QUIT);
   ibv_wc wc;
-  qp.wait_send(&wc);
-  CHECK(wc.opcode == IBV_WC_RDMA_WRITE);
+  // skip any trailing control-send completions (local DMA ACK/credit sends) before the QUIT write.
+  do { qp.wait_send(&wc); } while (wc.opcode != IBV_WC_RDMA_WRITE);
 #ifdef LOCAL_DMA
   delete dma_buf;
 #endif
