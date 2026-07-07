@@ -26,20 +26,47 @@ int main(int argc, char **argv)
   dr.wait_connected();
 
   rdma::DocaRdma::completion c;
+  char x;
+  auto wait = [&]{ while (!dr.poll(&c)) {} };
+  int rc = 0;
+
+  // (1) send/recv: client send_imm -> server recv
   if (server) {
-    dr.post_recv(LEN, LEN, 77);                // recv into recv region, wr_id 77
-    char x = 1; full_write(sock, &x, 1);       // tell client recv is posted
-    while (!dr.poll(&c)) {}
-    bool ok = c.is_recv && c.wr_id == 77 && c.imm == 0xABCD && c.len == LEN
+    dr.post_recv(LEN, LEN, 77);
+    x = 1; full_write(sock, &x, 1);
+    wait();
+    bool ok = c.op == rdma::DocaRdma::OP_RECV && c.imm == 0xABCD && c.len == LEN
               && (unsigned char)mem[LEN] == 0xC5;
-    std::cout << "server: recv imm=" << std::hex << c.imm << std::dec << " len=" << c.len
-              << " verify " << (ok ? "OK" : "FAIL") << std::endl;
-    return ok ? 0 : 1;
+    std::cout << "server: recv verify " << (ok ? "OK" : "FAIL") << std::endl; rc |= !ok;
+  } else {
+    full_read(sock, &x, 1);
+    memset(mem, 0xC5, LEN);
+    dr.send_imm(0, 0xABCD, 0, LEN, 55); wait();
   }
-  char x; full_read(sock, &x, 1);              // wait until recv posted
-  memset(mem, 0xC5, LEN);                       // send region
-  dr.send_imm(0, 0xABCD, 0, LEN, 55);          // send region -> peer, imm 0xABCD
-  while (!dr.poll(&c)) {}
-  std::cout << "client: send done wr_id=" << c.wr_id << std::endl;
-  return 0;
+
+  // (2) read: server fills its send region, client reads it
+  if (server) {
+    memset(mem, 0xD7, LEN);                    // server send region
+    x = 1; full_write(sock, &x, 1);
+    full_read(sock, &x, 1);                     // wait until client done reading
+  } else {
+    full_read(sock, &x, 1);                     // wait until server filled
+    dr.read(0, LEN, 0, LEN, 88); wait();        // read server[0..LEN) -> local recv region
+    bool ok = c.op == rdma::DocaRdma::OP_READ && (unsigned char)mem[LEN] == 0xD7;
+    std::cout << "client: read verify " << (ok ? "OK" : "FAIL") << std::endl; rc |= !ok;
+    x = 1; full_write(sock, &x, 1);
+  }
+
+  // (3) write: client writes into server's recv region
+  if (server) {
+    full_read(sock, &x, 1);                     // wait until client wrote
+    bool ok = (unsigned char)mem[LEN] == 0xE9;
+    std::cout << "server: write verify " << (ok ? "OK" : "FAIL") << std::endl; rc |= !ok;
+  } else {
+    memset(mem, 0xE9, LEN);                     // client send region
+    dr.write(0, 0, LEN, LEN, 99); wait();       // local[0..LEN) -> server recv region
+    x = 1; full_write(sock, &x, 1);
+  }
+
+  return rc;
 }

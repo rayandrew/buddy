@@ -241,10 +241,10 @@ void Proxy::fabric_poll(std::list<blocked_req>& blocklist)
 {
   rdma::DocaRdma::completion c;
   while (doca_fabric->poll(&c)) {
-    if (!c.is_recv) {                             // our send finished -> free the d2d buffer
+    if (c.op == rdma::DocaRdma::OP_SEND) {        // our send finished -> free the d2d buffer
       auto id = send_buf_id::from_int(c.wr_id);
       d2d_send[id.tid].mark_complete(id.rt.idx, id.repid);
-    } else {                                       // received into recv-half slot c.wr_id
+    } else {                                       // OP_RECV: received into recv-half slot c.wr_id
       int tid = omp_get_thread_num();
       in_counters[tid].count_remote++;
       in_counters[tid].bytes_remote += c.len;

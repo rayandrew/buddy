@@ -20,7 +20,8 @@ namespace buddy::rdma {
 // RoCE: BUDDY_RDMA_DEV (default mlx5_2, the SF device with GIDs) + gid index 0 + GRH.
 class DocaRdma {
   public:
-    struct completion { uint64_t wr_id; uint32_t imm; uint32_t len; unsigned conn; bool is_recv; };
+    enum op_type { OP_SEND, OP_RECV, OP_READ, OP_WRITE };
+    struct completion { uint64_t wr_id; uint32_t imm; uint32_t len; unsigned conn; op_type op; };
 
     // mem = a single region covering both send and recv buffers (registered once).
     DocaRdma(unsigned num_connections, char *mem, size_t mem_len);
@@ -32,6 +33,9 @@ class DocaRdma {
 
     void send_imm(unsigned conn_idx, uint32_t imm, size_t offset, size_t len, uint64_t wr_id);
     void post_recv(size_t offset, size_t len, uint64_t wr_id);
+    // one-sided: read peer[conn] mem[remote_off] -> local mem[local_off]; write is the reverse.
+    void read(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id);
+    void write(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id);
     bool poll(completion *c);                        // drives pe_progress; false if none ready
 
     void push(const completion &c) { completed.push(c); }   // used by callbacks
@@ -49,6 +53,8 @@ class DocaRdma {
     doca_mmap *mmap;
     doca_buf_inventory *inv;
     doca_rdma_connection **conns;
+    doca_mmap **remote_mmap;             // peer memory imported for read/write
+    char **remote_base;                  // peer mem base addr (for remote offsets)
     std::queue<completion> completed;
 };
 
