@@ -273,6 +273,7 @@ class Proxy {
     size_t fabric_ctrl;                // control region (READY/ACK descriptors) = 2*fabric_stage
     void fabric_poll(std::list<blocked_req>& blocked_reqs);
     void fabric_ack(unsigned peer, uint32_t slot, uint64_t id);
+    void fabric_credit(unsigned peer, uint32_t slot);
 #endif
 
     const int num_threads;

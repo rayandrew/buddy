@@ -36,6 +36,8 @@ class DocaRdma {
     // one-sided: read peer[conn] mem[remote_off] -> local mem[local_off]; write is the reverse.
     void read(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id);
     void write(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id);
+    // write + immediate: peer gets an OP_RECV completion carrying imm (consumes a posted recv).
+    void write_imm(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint32_t imm, uint64_t wr_id);
     bool poll(completion *c);                        // drives pe_progress; false if none ready
 
     void push(const completion &c) { completed.push(c); }   // used by callbacks

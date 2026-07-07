@@ -147,8 +147,10 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     d2d_mr = nullptr;
   }
 
-  // write mode: a separate landing region (peers RDMA_WRITE here); one disjoint sub-region of
-  // slots_per_peer slots per peer, mirroring each sender's per-thread bufcount buffers.
+  // write mode (ibverbs only): a separate landing region (peers RDMA_WRITE here); one disjoint
+  // sub-region of slots_per_peer slots per peer, mirroring each sender's per-thread bufcount bufs.
+  // DOCA_FABRIC writes into the peer's recv half instead, so it needs none of this.
+#ifndef DOCA_FABRIC
   if (config.d2d_mode == D2D_WRITE && num_remotes) {
     slots_per_peer = config.bufcount_remote * num_threads;
     size_t total_landing = (size_t)config.d2d_size * slots_per_peer * num_remotes;
@@ -158,6 +160,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     CHECK(landing_mr);
     peer_landing = new peer_land[num_remotes]();
   }
+#endif
 
   std::cout << "ranks:";
   for (unsigned i = 0; i < num_clients; i++)
@@ -246,6 +249,14 @@ void Proxy::fabric_ack(unsigned peer, uint32_t slot, uint64_t id)
   doca_fabric->send_imm(peer, IMM_D2D_ACK, fabric_ctrl + (size_t)(d2d_depth+slot)*64, sizeof(uint64_t), FABRIC_CTRL);
 }
 
+// write-mode credit: tell the sender its landing slot is free. The slot rides in the imm (the
+// recv half doubles as the write-landing region, so a payload buffer there would be corrupted).
+void Proxy::fabric_credit(unsigned peer, uint32_t slot)
+{
+  doca_fabric->send_imm(peer, (slot << IMM_SLOT_SHIFT) | IMM_D2D_CREDIT,
+      fabric_ctrl + (size_t)(d2d_depth + slot)*64, sizeof(uint32_t), FABRIC_CTRL);
+}
+
 // Drain doca_rdma D2D completions: free sent buffers (send + ack on read), route received ones.
 void Proxy::fabric_poll(std::list<blocked_req>& blocklist)
 {
@@ -273,23 +284,41 @@ void Proxy::fabric_poll(std::list<blocked_req>& blocklist)
       }
       continue;
     }
-    // OP_RECV
-    if (c.imm == IMM_D2D_READY) {                  // pull: descriptor -> issue the read
+    if (c.op == rdma::DocaRdma::OP_WRITE) continue; // write-imm sent; freed on CREDIT
+
+    // OP_RECV: tag in the low byte; write-imm packs the landing slot in the high bits
+    uint32_t tag = c.imm & IMM_TAG_MASK;
+    char *slotbuf = fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size;
+    if (tag == IMM_D2D_READY) {                    // pull: descriptor -> issue the read
       d2d_desc desc;
-      memcpy(&desc, fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, sizeof(desc));
+      memcpy(&desc, slotbuf, sizeof(desc));
       pending_reads[c.wr_id] = { c.conn, desc.id, desc.len };
       doca_fabric->read(c.conn, fabric_stage + (size_t)c.wr_id*config.d2d_size, desc.addr, desc.len, c.wr_id);
-    } else if (c.imm == IMM_D2D_ACK) {             // pull: our sent buffer was read -> free it
-      uint64_t fid;
-      memcpy(&fid, fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, sizeof(fid));
+    } else if (tag == IMM_D2D_ACK) {               // pull: our sent buffer was read -> free it
+      uint64_t fid; memcpy(&fid, slotbuf, sizeof(fid));
       auto id = send_buf_id::from_int(fid);
       d2d_send[id.tid].mark_complete(id.rt.idx, id.repid);
+      post_recv(route::make_remote(c.wr_id));
+    } else if (tag == IMM_D2D_WRITE) {             // push-write: data already in recv slot (imm>>8)
+      uint32_t slot = c.imm >> IMM_SLOT_SHIFT;
+      in_counters[tid].count_remote++;
+      in_counters[tid].bytes_remote += c.len;
+      route data_rt = route::make_remote(slot);
+      ReqBufRead reader(fabric_mem + fabric_stage + (size_t)slot*config.d2d_size, c.len);
+      bool drained = route_reqs(reader, blocklist);
+      post_recv(route::make_remote(c.wr_id));      // repost the imm-catch slot
+      if (drained) fabric_credit(c.conn, slot);
+      else { blocked_req br = {data_rt, reader, omp_get_wtime()+config.timeout, true, c.conn, slot};
+             blocklist.push_back(br); }
+    } else if (tag == IMM_D2D_CREDIT) {            // push-write: our landing slot (imm>>8) is free
+      uint32_t slot = c.imm >> IMM_SLOT_SHIFT;
+      d2d_send[0].mark_complete(slot / config.bufcount_remote, slot % config.bufcount_remote);
       post_recv(route::make_remote(c.wr_id));
     } else {                                       // push (send-mode) data in recv slot
       in_counters[tid].count_remote++;
       in_counters[tid].bytes_remote += c.len;
       route recv_rt = route::make_remote(c.wr_id);
-      ReqBufRead reader(fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, c.len);
+      ReqBufRead reader(slotbuf, c.len);
       if (route_reqs(reader, blocklist)) post_recv(recv_rt);
       else { blocked_req br = {recv_rt, reader, omp_get_wtime()+config.timeout}; blocklist.push_back(br); }
     }
@@ -542,8 +571,10 @@ void Proxy::rdma_loop()
 {
   quit_counter = 0;
 
-  if (config.d2d_mode == D2D_WRITE && num_remotes)
+#ifndef DOCA_FABRIC
+  if (config.d2d_mode == D2D_WRITE && num_remotes)   // ibverbs landing exchange; DOCA writes to recv half
     d2d_write_exchange();
+#endif
 
   uint64_t max_blocked = 0;
   uint64_t quiet_flush_events = 0;
@@ -598,7 +629,8 @@ void Proxy::rdma_loop()
         if (route_reqs(req->reqbuf, blocklist)) {
           if (req->needs_ack) {
 #ifdef DOCA_FABRIC
-            fabric_ack(req->ack_peer, req->recv_rt.idx, req->ack_id);
+            if (config.d2d_mode == D2D_WRITE) fabric_credit(req->ack_peer, (uint32_t)req->ack_id);
+            else fabric_ack(req->ack_peer, req->recv_rt.idx, req->ack_id);
 #else
             if (config.d2d_mode == D2D_WRITE) {
               uint32_t fs = (uint32_t)req->ack_id;
@@ -923,6 +955,10 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
     d2d_desc *desc = (d2d_desc *)(fabric_mem + fabric_ctrl + (size_t)s*64);
     *desc = { .addr = send_off, .id = id.as_int(), .rkey = 0, .len = (uint32_t)size };
     doca_fabric->send_imm(idx, IMM_D2D_READY, fabric_ctrl + (size_t)s*64, sizeof(d2d_desc), FABRIC_CTRL);
+  } else if (config.d2d_mode == D2D_WRITE) {
+    // push one-sided: write into the peer's recv slot s + imm(slot); freed on CREDIT.
+    doca_fabric->write_imm(idx, send_off, fabric_stage + (size_t)s*config.d2d_size, size,
+        (s << IMM_SLOT_SHIFT) | IMM_D2D_WRITE, FABRIC_CTRL);
   } else {
     doca_fabric->send_imm(idx, IMM_D2D_RDMA, send_off, size, id.as_int());   // push (send)
   }

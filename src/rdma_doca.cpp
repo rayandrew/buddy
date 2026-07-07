@@ -85,6 +85,16 @@ static void write_cb(struct doca_rdma_task_write *task, union doca_data tu, unio
 static void write_err(struct doca_rdma_task_write *task, union doca_data, union doca_data)
 { FAIL("doca_rdma write failed: " << doca_error_get_descr(doca_task_get_status(doca_rdma_task_write_as_task(task)))); }
 
+static void write_imm_cb(struct doca_rdma_task_write_imm *task, union doca_data tu, union doca_data cu)
+{
+  DocaRdma *self = (DocaRdma *)cu.ptr;
+  self->push({ tu.u64, 0, 0, 0, DocaRdma::OP_WRITE });
+  free_two((struct doca_buf *)doca_rdma_task_write_imm_get_src_buf(task), doca_rdma_task_write_imm_get_dst_buf(task));
+  doca_task_free(doca_rdma_task_write_imm_as_task(task));
+}
+static void write_imm_err(struct doca_rdma_task_write_imm *task, union doca_data, union doca_data)
+{ FAIL("doca_rdma write_imm failed: " << doca_error_get_descr(doca_task_get_status(doca_rdma_task_write_imm_as_task(task)))); }
+
 DocaRdma::DocaRdma(unsigned num_connections, char *mem, size_t mem_len)
   : num_connections(num_connections)
   , mem(mem)
@@ -106,6 +116,7 @@ DocaRdma::DocaRdma(unsigned num_connections, char *mem, size_t mem_len)
   CHECK_DOCA(doca_rdma_task_receive_set_conf(rdma, recv_cb, recv_err, NUM_RDMA_TASKS));
   CHECK_DOCA(doca_rdma_task_read_set_conf(rdma, read_cb, read_err, NUM_RDMA_TASKS));
   CHECK_DOCA(doca_rdma_task_write_set_conf(rdma, write_cb, write_err, NUM_RDMA_TASKS));
+  CHECK_DOCA(doca_rdma_task_write_imm_set_conf(rdma, write_imm_cb, write_imm_err, NUM_RDMA_TASKS));
   union doca_data cu = { .ptr = this };
   doca_ctx_set_user_data(ctx, cu);
 
@@ -214,6 +225,18 @@ void DocaRdma::write(unsigned conn_idx, size_t local_off, size_t remote_off, siz
   struct doca_rdma_task_write *task;
   CHECK_DOCA(doca_rdma_task_write_allocate_init(rdma, conns[conn_idx], src, dst, tu, &task));
   CHECK_DOCA(doca_task_submit(doca_rdma_task_write_as_task(task)));
+}
+
+void DocaRdma::write_imm(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint32_t imm, uint64_t wr_id)
+{
+  struct doca_buf *src, *dst;
+  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &src));
+  CHECK_DOCA(doca_buf_set_data(src, mem+local_off, len));
+  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
+  union doca_data tu; tu.u64 = wr_id;
+  struct doca_rdma_task_write_imm *task;
+  CHECK_DOCA(doca_rdma_task_write_imm_allocate_init(rdma, conns[conn_idx], src, dst, htobe32(imm), tu, &task));
+  CHECK_DOCA(doca_task_submit(doca_rdma_task_write_imm_as_task(task)));
 }
 
 bool DocaRdma::poll(completion *c)
