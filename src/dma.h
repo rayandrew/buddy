@@ -2,15 +2,9 @@
 
 #include <cstdint>
 #include <cstddef>
-#include <queue>
 
 struct doca_dev;
 struct doca_mmap;
-struct doca_ctx;
-struct doca_dma;
-struct doca_buf_inventory;
-struct doca_pe;
-struct doca_buf;
 
 namespace buddy::dma {
 
@@ -41,37 +35,30 @@ struct jobspec {
   direction dir;
 };
 
+// One DOCA progress engine + DMA context per worker (proxy thread), so workers DMA in
+// parallel. Device and memory mappings are shared; workers[] is defined in dma.cpp.
+struct dma_worker;
+
 class Engine {
   public:
-    Engine(unsigned num_clients, int *socks);
+    Engine(unsigned num_clients, unsigned num_workers, int *socks);
     ~Engine();
-    void transfer(jobspec job);
-    bool poll(jobspec *job);
+    void transfer(unsigned worker, jobspec job);
+    bool poll(unsigned worker, jobspec *job);
 
-    char *client_buf(unsigned client)
-    {
-      return local_buf + client*buflen;
-    }
-
-    // called by the DOCA completion callback (ctx user data = this)
-    void on_complete(const jobspec &j) { completed.push(j); }
+    char *client_buf(unsigned client) { return local_buf + client*buflen; }
 
   private:
     unsigned num_clients;
+    unsigned num_workers;
     size_t buflen;
     char *local_buf;
     char **remote_addr;
 
     doca_dev *dev;
-    doca_ctx *ctx;
-    doca_dma *dma_ctx;
-    doca_pe *pe;
     doca_mmap *local_map;
-    doca_buf_inventory *buf_inv;
     doca_mmap **remote_map;
-    doca_buf **doca_buf_local;
-    doca_buf **doca_buf_remote;
-    std::queue<jobspec> completed;
+    dma_worker *workers;
 };
 
 } // namespace buddy::dma

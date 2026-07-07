@@ -254,7 +254,9 @@ class Proxy {
     rdma::QP *local_qps;
     rdma::QP *remote_qps;
 #ifdef LOCAL_DMA
-    dma::Engine *dma_engine;
+    dma::Engine *dma_engine;           // proxy runs single-threaded under LOCAL_DMA (no lock)
+    unsigned local_idx_of(uint32_t qp_num);
+    void dma_xfer(unsigned client, uint32_t offset, uint32_t len, dma::direction dir);
 #endif
 
     const int num_threads;

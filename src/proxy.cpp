@@ -202,6 +202,26 @@ unsigned Proxy::remote_idx_of(uint32_t qp_num)
   FAIL("unknown remote qp_num " << qp_num);
 }
 
+#ifdef LOCAL_DMA
+unsigned Proxy::local_idx_of(uint32_t qp_num)
+{
+  for (unsigned i = 0; i < num_clients; i++)
+    if (local_qps[i].get_qp()->qp_num == qp_num)
+      return i;
+  FAIL("unknown local qp_num " << qp_num);
+}
+
+// Blocking DMA (proxy is single-threaded under LOCAL_DMA, so no lock needed).
+// Blocking DMA on this thread's own progress engine (workers run in parallel).
+void Proxy::dma_xfer(unsigned client, uint32_t offset, uint32_t len, dma::direction dir)
+{
+  unsigned w = omp_get_thread_num();
+  dma_engine->transfer(w, {client, offset, len, dir});
+  dma::jobspec done;
+  while (!dma_engine->poll(w, &done)) {}
+}
+#endif
+
 void Proxy::handle_read_complete(uint32_t slot, std::list<blocked_req>& blocklist)
 {
   int tid = omp_get_thread_num();
@@ -409,6 +429,31 @@ bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
         TRACE(1, "recv D2D_CREDIT slot " << abs_slot);
         break;
       }
+
+#ifdef LOCAL_DMA
+    case IMM_H2D_DMA:
+      {
+        // local DMA: control carries len; pull the host SEND staging, then route it.
+        route recv_rt = route::from_int(wc.wr_id);
+        unsigned client = local_idx_of(wc.qp_num);
+        uint64_t len;
+        memcpy(&len, get_recv_buf(recv_rt), sizeof(len));
+        int tid = omp_get_thread_num();
+        dma_xfer(client, DMA_OFFSET_SEND, (uint32_t)len, dma::H2D);
+        in_counters[tid].count_local++;
+        in_counters[tid].bytes_local += len;
+        TRACE(1, "recv H2D_DMA size " << len << " client " << client);
+
+        ReqBufRead reader(dma_engine->client_buf(client) + DMA_OFFSET_SEND, len);
+        if (route_reqs(reader, blocklist))
+          post_recv(recv_rt);
+        else {
+          blocked_req br = {recv_rt, reader, omp_get_wtime() + config.timeout};
+          blocklist.push_back(br);
+        }
+        break;
+      }
+#endif
 
     default:
       FAIL("unknown imm_tag for recv " << imm_tag);
@@ -819,8 +864,18 @@ bool Proxy::flush_local(unsigned idx, unsigned repid)
   send_buf_id id = {rt, (uint16_t)tid, (uint16_t)repid};
 
   TRACE(1, "send to local rank " << local_idx_to_rank[idx] << " (idx " << idx << ")" << " size " << size << " thread " << tid);
+#ifdef LOCAL_DMA
+  // push aggregated data into the host RECV staging via DMA, then notify the size.
+  memcpy(dma_engine->client_buf(idx) + DMA_OFFSET_RECV,
+      (char *)d2h_send[tid].mr()->addr + d2h_send[tid].offset(idx, repid), size);
+  dma_xfer(idx, DMA_OFFSET_RECV, (uint32_t)size, dma::D2H);
+  uint64_t sz = size;
+  local_qps[idx].send_imm_inline(IMM_D2H_DMA, (char *)&sz, sizeof(sz), 0, WRID_CTRL);
+  d2h_send[tid].mark_complete(idx, repid);       // no send completion frees it in DMA mode
+#else
   local_qps[idx].send_imm(IMM_D2H_RDMA, d2h_send[tid].mr(), size,
       d2h_send[tid].offset(idx, repid), id.as_int());
+#endif
 
   toc(TT_LOCFLUSH);
 

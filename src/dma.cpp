@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdlib>
+#include <queue>
 #include <doca_dev.h>
 #include <doca_dma.h>
 #include <doca_mmap.h>
@@ -22,6 +23,15 @@ namespace buddy::dma {
 
 static const char *host_pci() { const char *e = getenv("BUDDY_HOST_PCI"); return e && *e ? e : HOST_PCIE_DEFAULT; }
 static const char *dpu_pci()  { const char *e = getenv("BUDDY_DPU_PCI");  return e && *e ? e : DPU_PCIE_DEFAULT; }
+
+// per-worker DOCA context (one progress engine each -> parallel DMA across proxy threads)
+struct dma_worker {
+  doca_ctx *ctx = nullptr;
+  doca_dma *dma = nullptr;
+  doca_pe *pe = nullptr;
+  doca_buf_inventory *inv = nullptr;
+  std::queue<jobspec> completed;
+};
 
 struct buffer_desc {
     void *addr;
@@ -88,11 +98,16 @@ void Buffer::send(int sockfd)
 static void dma_completed_cb(struct doca_dma_task_memcpy *task,
     union doca_data task_ud, union doca_data ctx_ud)
 {
-  Engine *engine = (Engine *)ctx_ud.ptr;
+  dma_worker *w = (dma_worker *)ctx_ud.ptr;
   jobspec *job = (jobspec *)task_ud.ptr;
-  engine->on_complete(*job);
+  w->completed.push(*job);
   delete job;
-  doca_task_free(doca_dma_task_memcpy_as_task(task));   // bufs are persistent -> don't free them
+
+  struct doca_buf *src = (struct doca_buf *)doca_dma_task_memcpy_get_src(task);
+  struct doca_buf *dst = doca_dma_task_memcpy_get_dst(task);
+  doca_task_free(doca_dma_task_memcpy_as_task(task));
+  if (src) doca_buf_dec_refcount(src, NULL);
+  if (dst) doca_buf_dec_refcount(dst, NULL);
 }
 
 static void dma_error_cb(struct doca_dma_task_memcpy *task,
@@ -103,10 +118,11 @@ static void dma_error_cb(struct doca_dma_task_memcpy *task,
 }
 
 // ------------------------------------------------------------------- Engine (DPU side)
-Engine::Engine(unsigned num_clients, int *socks)
+Engine::Engine(unsigned num_clients, unsigned num_workers, int *socks)
   : num_clients(num_clients)
+  , num_workers(num_workers)
 {
-  CHECK(num_clients > 0);
+  CHECK(num_clients > 0 && num_workers > 0);
   dev = open_device(dpu_pci());
 
   auto bds = new buffer_desc[num_clients];
@@ -120,101 +136,95 @@ Engine::Engine(unsigned num_clients, int *socks)
   local_buf = new char[num_clients * buflen];
   remote_addr = new char*[num_clients];
 
-  CHECK_DOCA(doca_dma_create(dev, &dma_ctx));
-  ctx = doca_dma_as_ctx(dma_ctx);
-
-  CHECK_DOCA(doca_pe_create(&pe));
-  CHECK_DOCA(doca_pe_connect_ctx(pe, ctx));
-  CHECK_DOCA(doca_dma_task_memcpy_set_conf(dma_ctx, dma_completed_cb, dma_error_cb, NUM_DMA_TASKS));
-
-  union doca_data ctx_ud = { .ptr = this };
-  doca_ctx_set_user_data(ctx, ctx_ud);
-
-  CHECK_DOCA(doca_buf_inventory_create(2*num_clients, &buf_inv));
-  CHECK_DOCA(doca_buf_inventory_start(buf_inv));
-
   CHECK_DOCA(doca_mmap_create(&local_map));
   CHECK_DOCA(doca_mmap_add_dev(local_map, dev));
   CHECK_DOCA(doca_mmap_set_memrange(local_map, local_buf, num_clients * buflen));
   CHECK_DOCA(doca_mmap_start(local_map));
 
-  CHECK_DOCA(doca_ctx_start(ctx));
-
   remote_map = new doca_mmap*[num_clients];
-  doca_buf_local = new doca_buf*[num_clients];
-  doca_buf_remote = new doca_buf*[num_clients];
-
   for (unsigned i = 0; i < num_clients; i++) {
     char *export_desc = new char[bds[i].export_desc_len];
     full_read(socks[i], export_desc, bds[i].export_desc_len);
     CHECK_DOCA(doca_mmap_create_from_export(NULL, export_desc, bds[i].export_desc_len,
           dev, &remote_map[i]));
     delete[] export_desc;
-
-    char *lbuf = local_buf + i*buflen;
-    CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(buf_inv, local_map, lbuf, buflen, &doca_buf_local[i]));
-    CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(buf_inv, remote_map[i], bds[i].addr, buflen, &doca_buf_remote[i]));
     remote_addr[i] = (char *)bds[i].addr;
   }
-
   delete[] bds;
+
+  workers = new dma_worker[num_workers];
+  for (unsigned w = 0; w < num_workers; w++) {
+    CHECK_DOCA(doca_dma_create(dev, &workers[w].dma));
+    workers[w].ctx = doca_dma_as_ctx(workers[w].dma);
+    CHECK_DOCA(doca_pe_create(&workers[w].pe));
+    CHECK_DOCA(doca_pe_connect_ctx(workers[w].pe, workers[w].ctx));
+    CHECK_DOCA(doca_dma_task_memcpy_set_conf(workers[w].dma, dma_completed_cb, dma_error_cb, NUM_DMA_TASKS));
+    union doca_data ctx_ud = { .ptr = &workers[w] };
+    doca_ctx_set_user_data(workers[w].ctx, ctx_ud);
+    CHECK_DOCA(doca_buf_inventory_create(2*num_clients + 2, &workers[w].inv));
+    CHECK_DOCA(doca_buf_inventory_start(workers[w].inv));
+    CHECK_DOCA(doca_ctx_start(workers[w].ctx));
+  }
 }
 
 Engine::~Engine()
 {
-  for (unsigned i = 0; i < num_clients; i++) {
-    doca_buf_dec_refcount(doca_buf_local[i], NULL);
-    doca_buf_dec_refcount(doca_buf_remote[i], NULL);
-    doca_mmap_destroy(remote_map[i]);
+  for (unsigned w = 0; w < num_workers; w++) {
+    doca_ctx_stop(workers[w].ctx);
+    doca_buf_inventory_destroy(workers[w].inv);
+    doca_dma_destroy(workers[w].dma);
+    doca_pe_destroy(workers[w].pe);
   }
-  delete[] doca_buf_remote;
-  delete[] doca_buf_local;
+  delete[] workers;
+
+  for (unsigned i = 0; i < num_clients; i++)
+    doca_mmap_destroy(remote_map[i]);
   delete[] remote_map;
   delete[] remote_addr;
 
-  doca_ctx_stop(ctx);
-  doca_buf_inventory_destroy(buf_inv);
   doca_mmap_destroy(local_map);
-  doca_dma_destroy(dma_ctx);
-  doca_pe_destroy(pe);
   doca_dev_close(dev);
   delete[] local_buf;
 }
 
-void Engine::transfer(jobspec job)
+void Engine::transfer(unsigned worker, jobspec job)
 {
-  assert(job.client < num_clients);
+  assert(job.client < num_clients && worker < num_workers);
   assert((size_t)job.offset + job.len <= buflen);
 
+  dma_worker &w = workers[worker];
   char *lptr = local_buf + job.client*buflen + job.offset;
   char *rptr = remote_addr[job.client] + job.offset;
 
-  doca_buf *src_buf, *dst_buf;
-  if (job.dir == H2D) {                       // pull host -> DPU local
-    CHECK_DOCA(doca_buf_set_data(doca_buf_remote[job.client], rptr, job.len));
-    CHECK_DOCA(doca_buf_set_data(doca_buf_local[job.client], lptr, 0));
-    src_buf = doca_buf_remote[job.client];
-    dst_buf = doca_buf_local[job.client];
-  } else {                                     // push DPU local -> host
-    CHECK_DOCA(doca_buf_set_data(doca_buf_local[job.client], lptr, job.len));
-    CHECK_DOCA(doca_buf_set_data(doca_buf_remote[job.client], rptr, 0));
-    src_buf = doca_buf_local[job.client];
-    dst_buf = doca_buf_remote[job.client];
+  struct doca_buf *lbuf, *rbuf;
+  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(w.inv, local_map, lptr, job.len, &lbuf));
+  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(w.inv, remote_map[job.client], rptr, job.len, &rbuf));
+
+  struct doca_buf *src, *dst;
+  if (job.dir == H2D) {                          // pull host -> DPU local
+    CHECK_DOCA(doca_buf_set_data(rbuf, rptr, job.len));
+    CHECK_DOCA(doca_buf_set_data(lbuf, lptr, 0));
+    src = rbuf; dst = lbuf;
+  } else {                                        // push DPU local -> host
+    CHECK_DOCA(doca_buf_set_data(lbuf, lptr, job.len));
+    CHECK_DOCA(doca_buf_set_data(rbuf, rptr, 0));
+    src = lbuf; dst = rbuf;
   }
 
   union doca_data task_ud = { .ptr = new jobspec(job) };
   struct doca_dma_task_memcpy *task;
-  CHECK_DOCA(doca_dma_task_memcpy_alloc_init(dma_ctx, src_buf, dst_buf, task_ud, &task));
+  CHECK_DOCA(doca_dma_task_memcpy_alloc_init(w.dma, src, dst, task_ud, &task));
   CHECK_DOCA(doca_task_submit(doca_dma_task_memcpy_as_task(task)));
 }
 
-bool Engine::poll(jobspec *job)
+bool Engine::poll(unsigned worker, jobspec *job)
 {
-  doca_pe_progress(pe);            // drives completion callbacks -> `completed`
-  if (completed.empty())
+  dma_worker &w = workers[worker];
+  doca_pe_progress(w.pe);
+  if (w.completed.empty())
     return false;
-  *job = completed.front();
-  completed.pop();
+  *job = w.completed.front();
+  w.completed.pop();
   return true;
 }
 

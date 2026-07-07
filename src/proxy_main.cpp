@@ -11,6 +11,7 @@
 #include "proxy.h"
 
 #ifdef LOCAL_DMA
+#include <omp.h>
 #include "dma.h"
 #endif
 
@@ -164,7 +165,7 @@ int main(int argc, char **argv)
   address_table = nullptr;
 
 #ifdef LOCAL_DMA
-  buddy::dma::Engine dma_engine(conn_count, conn_list);
+  buddy::dma::Engine dma_engine(conn_count, omp_get_max_threads(), conn_list);
 #endif
 
   buddy::dpu::ProxyConfig config;

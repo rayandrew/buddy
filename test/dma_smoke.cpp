@@ -36,19 +36,19 @@ int main(int argc, char **argv)
 
   // dpu
   int sock = tcp_connect(argv[2], atoi(argv[3]));
-  dma::Engine eng(1, &sock);
+  dma::Engine eng(1, 1, &sock);                                    // 1 client, 1 worker
   dma::jobspec done;
 
-  eng.transfer({0, 0, (uint32_t)LEN, dma::H2D});                    // pull host -> local
-  while (!eng.poll(&done)) {}
+  eng.transfer(0, {0, 0, (uint32_t)LEN, dma::H2D});                 // pull host -> local
+  while (!eng.poll(0, &done)) {}
   char *lb = eng.client_buf(0);
   bool ok = true;
   for (size_t i = 0; i < LEN; i++) if ((unsigned char)lb[i] != (i & 0xff)) { ok = false; break; }
   std::cout << "dpu: H2D verify " << (ok ? "OK" : "FAIL") << std::endl;
 
   for (int i = 0; i < 16; i++) lb[i] = (char)0xAB;                  // D2H pattern
-  eng.transfer({0, 0, 16, dma::D2H});                              // push local -> host
-  while (!eng.poll(&done)) {}
+  eng.transfer(0, {0, 0, 16, dma::D2H});                           // push local -> host
+  while (!eng.poll(0, &done)) {}
   char x = 1; full_write(sock, &x, 1);
   std::cout << "dpu: D2H done" << std::endl;
   return ok ? 0 : 1;
