@@ -225,9 +225,9 @@ int main(int argc, char **argv)
   }
 
 #ifdef DOCA_FABRIC
-  // D2D over doca_rdma. fabric_mem = send half | recv half; one slot per (remote,repid), 1 thread.
+  // D2D over doca_rdma. fabric_mem = send half | recv half | ctrl (READY/ACK descriptors).
   size_t fabric_slots = (size_t)config.bufcount_remote * num_remotes;
-  size_t fabric_len = 2 * fabric_slots * config.d2d_size;
+  size_t fabric_len = 2 * fabric_slots * config.d2d_size + 2 * fabric_slots * 64;
   char *fabric_mem = new char[fabric_len];
   buddy::rdma::DocaRdma doca_fabric(num_remotes, fabric_mem, fabric_len);
   for (int i = 0; i < num_remotes; i++) { doca_fabric.connect(i, rsock[i], rsrv[i]); close(rsock[i]); }

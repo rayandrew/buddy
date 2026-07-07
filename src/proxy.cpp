@@ -45,6 +45,7 @@ namespace buddy::dpu {
 // reserved top bytes let poll_send_queue tell reads/control sends apart from flushes.
 static const uint64_t WRID_READ = 0xFFull << 56;   // low 32 bits = recv slot idx
 static const uint64_t WRID_CTRL = 0xFEull << 56;   // READY/ACK send; nothing to free
+static const uint64_t FABRIC_CTRL = ~0ull;         // doca_rdma READY/ACK send; skip on completion
 
 Proxy::~Proxy()
 {
@@ -165,6 +166,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 
 #ifdef DOCA_FABRIC
   fabric_stage = (size_t)d2d_depth * config.d2d_size;   // recv half starts here
+  fabric_ctrl = 2 * fabric_stage;                        // ctrl slots: READY at s, ACK at d2d_depth+r
 #endif
 
   for (uint32_t i = 0; i < h2d_depth; i++)
@@ -236,27 +238,60 @@ void Proxy::dma_xfer(unsigned client, uint32_t offset, uint32_t len, dma::direct
 #endif
 
 #ifdef DOCA_FABRIC
-// Drain doca_rdma D2D completions: free sent buffers, route received ones.
+// send an ACK (echoing the sender's send_buf_id) so it frees its buffer -- via doca_rdma.
+void Proxy::fabric_ack(unsigned peer, uint32_t slot, uint64_t id)
+{
+  uint64_t *a = (uint64_t *)(fabric_mem + fabric_ctrl + (size_t)(d2d_depth + slot)*64);
+  *a = id;
+  doca_fabric->send_imm(peer, IMM_D2D_ACK, fabric_ctrl + (size_t)(d2d_depth+slot)*64, sizeof(uint64_t), FABRIC_CTRL);
+}
+
+// Drain doca_rdma D2D completions: free sent buffers (send + ack on read), route received ones.
 void Proxy::fabric_poll(std::list<blocked_req>& blocklist)
 {
+  int tid = omp_get_thread_num();
   rdma::DocaRdma::completion c;
   while (doca_fabric->poll(&c)) {
-    if (c.op == rdma::DocaRdma::OP_SEND) {        // our send finished -> free the d2d buffer
-      auto id = send_buf_id::from_int(c.wr_id);
+    if (c.op == rdma::DocaRdma::OP_SEND) {
+      if (c.wr_id == FABRIC_CTRL) continue;        // READY/ACK control send
+      auto id = send_buf_id::from_int(c.wr_id);    // push (send-mode) data flushed
       d2d_send[id.tid].mark_complete(id.rt.idx, id.repid);
-    } else {                                       // OP_RECV: received into recv-half slot c.wr_id
-      int tid = omp_get_thread_num();
+      continue;
+    }
+    if (c.op == rdma::DocaRdma::OP_READ) {         // pull: bulk arrived in recv slot c.wr_id
+      auto &pr = pending_reads[c.wr_id];
       in_counters[tid].count_remote++;
-      in_counters[tid].bytes_remote += c.len;
-      TRACE(1, "recv D2D_FABRIC size " << c.len << " slot " << c.wr_id);
+      in_counters[tid].bytes_remote += pr.len;
       route recv_rt = route::make_remote(c.wr_id);
-      ReqBufRead reader(fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, c.len);
-      if (route_reqs(reader, blocklist))
+      ReqBufRead reader(fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, pr.len);
+      if (route_reqs(reader, blocklist)) {
+        fabric_ack(pr.peer, c.wr_id, pr.desc_id);
         post_recv(recv_rt);
-      else {
-        blocked_req br = {recv_rt, reader, omp_get_wtime() + config.timeout};
+      } else {
+        blocked_req br = {recv_rt, reader, omp_get_wtime()+config.timeout, true, pr.peer, pr.desc_id};
         blocklist.push_back(br);
       }
+      continue;
+    }
+    // OP_RECV
+    if (c.imm == IMM_D2D_READY) {                  // pull: descriptor -> issue the read
+      d2d_desc desc;
+      memcpy(&desc, fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, sizeof(desc));
+      pending_reads[c.wr_id] = { c.conn, desc.id, desc.len };
+      doca_fabric->read(c.conn, fabric_stage + (size_t)c.wr_id*config.d2d_size, desc.addr, desc.len, c.wr_id);
+    } else if (c.imm == IMM_D2D_ACK) {             // pull: our sent buffer was read -> free it
+      uint64_t fid;
+      memcpy(&fid, fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, sizeof(fid));
+      auto id = send_buf_id::from_int(fid);
+      d2d_send[id.tid].mark_complete(id.rt.idx, id.repid);
+      post_recv(route::make_remote(c.wr_id));
+    } else {                                       // push (send-mode) data in recv slot
+      in_counters[tid].count_remote++;
+      in_counters[tid].bytes_remote += c.len;
+      route recv_rt = route::make_remote(c.wr_id);
+      ReqBufRead reader(fabric_mem + fabric_stage + (size_t)c.wr_id*config.d2d_size, c.len);
+      if (route_reqs(reader, blocklist)) post_recv(recv_rt);
+      else { blocked_req br = {recv_rt, reader, omp_get_wtime()+config.timeout}; blocklist.push_back(br); }
     }
   }
 }
@@ -562,6 +597,9 @@ void Proxy::rdma_loop()
       while (req != blocklist.end()) {
         if (route_reqs(req->reqbuf, blocklist)) {
           if (req->needs_ack) {
+#ifdef DOCA_FABRIC
+            fabric_ack(req->ack_peer, req->recv_rt.idx, req->ack_id);
+#else
             if (config.d2d_mode == D2D_WRITE) {
               uint32_t fs = (uint32_t)req->ack_id;
               remote_qps[req->ack_peer].send_imm_inline(IMM_D2D_CREDIT, &fs, sizeof(fs), 0, WRID_CTRL);
@@ -569,6 +607,7 @@ void Proxy::rdma_loop()
               remote_qps[req->ack_peer].send_imm_inline(IMM_D2D_ACK, &req->ack_id,
                   sizeof(req->ack_id), 0, WRID_CTRL);
             }
+#endif
           }
           post_recv(req->recv_rt);
           req = blocklist.erase(req);
@@ -875,10 +914,18 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
   TRACE(1, "send to remote " << idx << " size " << size << " thread " << tid);
   char *buf = (char *)d2d_send[tid].mr()->addr + d2d_send[tid].offset(idx, repid);
 #ifdef DOCA_FABRIC
-  // all-DOCA: stage into the send half and send over doca_rdma; freed on send completion.
-  size_t send_off = (size_t)(idx * config.bufcount_remote + repid) * config.d2d_size;
+  // all-DOCA: stage into the send half, then push (send) or advertise for pull (read).
+  unsigned s = idx * config.bufcount_remote + repid;
+  size_t send_off = (size_t)s * config.d2d_size;
   memcpy(fabric_mem + send_off, buf, size);
-  doca_fabric->send_imm(idx, IMM_D2D_RDMA, send_off, size, id.as_int());
+  if (config.d2d_mode == D2D_READ) {
+    // pull: peer reads our send slot; buffer stays FLUSHING until it ACKs.
+    d2d_desc *desc = (d2d_desc *)(fabric_mem + fabric_ctrl + (size_t)s*64);
+    *desc = { .addr = send_off, .id = id.as_int(), .rkey = 0, .len = (uint32_t)size };
+    doca_fabric->send_imm(idx, IMM_D2D_READY, fabric_ctrl + (size_t)s*64, sizeof(d2d_desc), FABRIC_CTRL);
+  } else {
+    doca_fabric->send_imm(idx, IMM_D2D_RDMA, send_off, size, id.as_int());   // push (send)
+  }
 #else
   if (config.d2d_mode == D2D_READ) {
     // pull: advertise the buffer; it stays FLUSHING until the peer reads it and acks.

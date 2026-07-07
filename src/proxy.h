@@ -269,8 +269,10 @@ class Proxy {
     // one send slot / recv slot per (remote, repid). Proxy is single-threaded (one doca_rdma pe).
     rdma::DocaRdma *doca_fabric;
     char *fabric_mem;
-    size_t fabric_stage;               // bytes in each half = fabric slots * d2d_size
+    size_t fabric_stage;               // bytes in send/recv half = fabric slots * d2d_size
+    size_t fabric_ctrl;                // control region (READY/ACK descriptors) = 2*fabric_stage
     void fabric_poll(std::list<blocked_req>& blocked_reqs);
+    void fabric_ack(unsigned peer, uint32_t slot, uint64_t id);
 #endif
 
     const int num_threads;
