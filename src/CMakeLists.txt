@@ -7,7 +7,7 @@ add_library(buddy_common INTERFACE)
 target_link_libraries(buddy_common INTERFACE -libverbs)
 
 if(LOCAL_DMA)
-	target_link_directories(buddy_common INTERFACE /opt/mellanox/doca/lib64 /opt/mellanox/doca/lib/aarch64-linux-gnu)
+	target_link_directories(buddy_common INTERFACE /opt/mellanox/doca/lib64 /opt/mellanox/doca/lib/${CMAKE_LIBRARY_ARCHITECTURE} /opt/mellanox/doca/lib/x86_64-linux-gnu /opt/mellanox/doca/lib/aarch64-linux-gnu)
 	target_include_directories(buddy_common INTERFACE /opt/mellanox/doca/include)
 	target_compile_options(buddy_common INTERFACE -D DOCA_ALLOW_EXPERIMENTAL_API)
 	target_link_libraries(buddy_common INTERFACE -ldoca_common -ldoca_dma)
