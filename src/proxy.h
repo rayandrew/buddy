@@ -6,6 +6,9 @@
 #include "rdma.h"
 #include "request.h"
 #include "util.h"
+#ifdef LOCAL_DMA
+#include "dma.h"
+#endif
 
 namespace buddy::dpu {
 
@@ -234,6 +237,9 @@ class Proxy {
     Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
         unsigned num_remotes, int world_size,
         rdma::QP *local_qps, rdma::QP *remote_qps,
+#ifdef LOCAL_DMA
+        dma::Engine *dma_engine,
+#endif
         int *ranks, route *routing_table);
     ~Proxy();
     void rdma_loop();
@@ -247,6 +253,9 @@ class Proxy {
     proxy_cqs cqs;
     rdma::QP *local_qps;
     rdma::QP *remote_qps;
+#ifdef LOCAL_DMA
+    dma::Engine *dma_engine;
+#endif
 
     const int num_threads;
     const size_t h2d_depth;

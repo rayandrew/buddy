@@ -88,6 +88,9 @@ int get_num_threads()
 Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     unsigned num_remotes, int world_size,
     rdma::QP *local_qps, rdma::QP *remote_qps,
+#ifdef LOCAL_DMA
+    dma::Engine *dma_engine,
+#endif
     int *ranks, route *routing_table)
   : config(config)
   , num_clients(num_clients)
@@ -96,6 +99,9 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   , cqs(cqs)
   , local_qps(local_qps)
   , remote_qps(remote_qps)
+#ifdef LOCAL_DMA
+  , dma_engine(dma_engine)
+#endif
   , num_threads(get_num_threads())
   , h2d_depth(config.bufcount_local*num_clients*num_threads)
   , d2d_depth(config.bufcount_remote*num_remotes*num_threads)
