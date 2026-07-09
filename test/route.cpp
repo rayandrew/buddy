@@ -195,6 +195,50 @@ size_t init_buf(char *inbuf, size_t incount, uint32_t datasize, unsigned num_out
     return max_out;
 }
 
+#ifndef SIMD
+// noinline: gives the timed loop a symbol to attach per-function PMU to. One call per loop.
+#ifdef FIXED
+__attribute__((noinline)) static void route_kernel(char **outbufs, size_t out_idx[], char *inbuf,
+                                                   size_t insize, uint32_t datasize)
+{
+#ifdef DATASIZE_CONST
+  // compile-time size lets gcc fold memcpy into a single load/store
+  const uint32_t ds = DATASIZE_CONST;
+  (void)datasize;
+#else
+  const uint32_t ds = datasize;
+#endif
+  size_t in_idx = 0;
+  while (in_idx < insize) {
+    int32_t dst = *((int32_t *)(inbuf+in_idx));
+    in_idx += sizeof(int32_t);
+
+#ifndef TERM
+    *((int32_t *)(outbufs[dst] + out_idx[dst])) = dst;
+    out_idx[dst] += out_header_size;
+#endif
+
+    memcpy(outbufs[dst] + out_idx[dst], inbuf + in_idx, ds);
+    in_idx += ds;
+    out_idx[dst] += ds;
+  }
+}
+#else
+__attribute__((noinline)) static void route_kernel(buddy::ReqBufWrite outwriters[], char *inbuf,
+                                                   size_t insize)
+{
+  buddy::ReqBufRead inreader(inbuf, insize);
+  buddy::request_head *head;
+  char *datap;
+  while (inreader.peek(&head, &datap)) {
+    [[maybe_unused]] bool ok = outwriters[head->dst].append(*head, datap);
+    assert(ok);
+    inreader.advance(head);
+  }
+}
+#endif
+#endif
+
 int main(int argc, char **argv)
 {
   size_t incount = 10000000;
@@ -255,29 +299,9 @@ int main(int argc, char **argv)
 
 #else
 #ifdef FIXED
-    size_t in_idx = 0;
-    while (in_idx < insize) {
-      int32_t dst = *((int32_t *)(inbuf+in_idx));
-      in_idx += sizeof(int32_t);
-
-#ifndef TERM
-      *((int32_t *)(outbufs[dst] + out_idx[dst])) = dst;
-      out_idx[dst] += out_header_size;
-#endif
-
-      memcpy(outbufs[dst] + out_idx[dst], inbuf + in_idx, datasize);
-      in_idx += datasize;
-      out_idx[dst] += datasize;
-    }
+    route_kernel(outbufs, out_idx, inbuf, insize, datasize);
 #else
-    buddy::ReqBufRead inreader(inbuf, insize);
-    buddy::request_head *head;
-    char *datap;
-    while (inreader.peek(&head, &datap)) {
-      [[maybe_unused]] bool ok = outwriters[head->dst].append(*head, datap);
-      assert(ok);
-      inreader.advance(head);
-    }
+    route_kernel(outwriters, inbuf, insize);
 #endif
 #endif
 
