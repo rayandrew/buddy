@@ -47,6 +47,16 @@ static const uint64_t WRID_READ = 0xFFull << 56;   // low 32 bits = recv slot id
 static const uint64_t WRID_CTRL = 0xFEull << 56;   // READY/ACK send; nothing to free
 static const uint64_t FABRIC_CTRL = ~0ull;         // doca_rdma READY/ACK send; skip on completion
 
+static const int POLL_BATCH_MAX = 16;              // cap on completions drained per poll
+static int get_poll_batch()
+{
+  const char *e = getenv("BUDDY_POLL_BATCH");
+  int b = e ? atoi(e) : 1;                          // default 1 = original one-at-a-time behavior
+  if (b < 1) b = 1;
+  if (b > POLL_BATCH_MAX) b = POLL_BATCH_MAX;
+  return b;
+}
+
 #ifdef LOCAL_DMA
 static const size_t DMA_CTRL_LEN = 64;             // local recv buffer holds only an 8B size
 static unsigned dma_slots(size_t region, size_t slot)
@@ -138,6 +148,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
   , rx_depth(h2d_depth + d2d_depth)
   , local_recv_len(config.h2d_size)
 #endif
+  , poll_batch(get_poll_batch())
   , local_idx_to_rank(ranks)
   , routing_table(routing_table)
 {
@@ -393,7 +404,7 @@ void Proxy::poll_send_queue(std::list<blocked_req>& blocklist)
         if (local_qps[idx].get_qp()->qp_num == wc[i].qp_num)
           std::cerr << "destination: rank " << local_idx_to_rank[idx] << " (local idx " << idx << ")" << std::endl;
 
-      for (unsigned idx = 0; idx < num_remotes; idx++)
+      for (unsigned idx = 0; remote_qps && idx < num_remotes; idx++)   // remote_qps is null under DOCA_FABRIC (D2D is DocaRdma) -> don't deref
         if (remote_qps[idx].get_qp()->qp_num == wc[i].qp_num)
           std::cerr << "destination: remote dpu " << idx << std::endl;
 
@@ -426,29 +437,35 @@ void Proxy::poll_send_queue(std::list<blocked_req>& blocklist)
 
 bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
 {
-  // To avoid deadlock situation where a d2d recv is blocked by earlier h2d
-  // recvs we should only take 1 wc from the queue at once.
-  // TODO: not relevant anymore.
-  ibv_wc wc;
+  // Historically one completion per poll (guarded by a since-stale deadlock-avoidance TODO).
+  // BUDDY_POLL_BATCH raises poll_batch so we drain up to N per poll -- fewer poll passes, the
+  // way the doca_rdma path (fabric_poll) already does. poll_batch==1 keeps the original behavior.
+  ibv_wc wcs[POLL_BATCH_MAX];
 
   tic(TT_POLL);
 
   // Prioritize remote recvs first. To rate limit fast hosts.
-  int n = ibv_poll_cq(cqs.remote_recv, 1, &wc);
+  int n = ibv_poll_cq(cqs.remote_recv, poll_batch, wcs);
   CHECK(n >= 0);
 
   if (!n) {
-    n = ibv_poll_cq(cqs.local_recv, 1, &wc);
+    n = ibv_poll_cq(cqs.local_recv, poll_batch, wcs);
     CHECK(n >= 0);
   }
 
-  if (!n)
-    return false;
-  else
-    assert(n == 1);
-
   toc(TT_POLL);
 
+  if (!n)
+    return false;
+
+  for (int w = 0; w < n; w++)
+    process_recv_wc(wcs[w], blocklist);
+
+  return true;
+}
+
+void Proxy::process_recv_wc(const ibv_wc& wc, std::list<blocked_req>& blocklist)
+{
   CHECK(wc.status == IBV_WC_SUCCESS);
   CHECK(wc.opcode == IBV_WC_RECV || wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM);
   CHECK(wc.wc_flags & IBV_WC_WITH_IMM);
@@ -606,8 +623,6 @@ bool Proxy::poll_recv_queue(std::list<blocked_req>& blocklist)
       FAIL("unknown imm_tag for recv " << imm_tag);
       break;
   }
-
-  return true;
 }
 
 void Proxy::rdma_loop()

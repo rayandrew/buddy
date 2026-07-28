@@ -15,8 +15,17 @@
 #include "dma.h"
 #endif
 
+#include <execinfo.h>
+#include <csignal>
+static void dc_segv(int sig) {          // print a backtrace on crash (needs -g -rdynamic to resolve names)
+  void *bt[64]; int n = backtrace(bt, 64);
+  fprintf(stderr, "\n=== proxy caught signal %d, backtrace: ===\n", sig);
+  backtrace_symbols_fd(bt, n, 2); fflush(stderr); _exit(139);
+}
+
 int main(int argc, char **argv)
 {
+  signal(SIGSEGV, dc_segv); signal(SIGABRT, dc_segv);
   CHECK_MPI(MPI_Init(NULL, NULL));
 
   int lsock = buddy::tcp_listen(buddy::LOCAL_PORT);
