@@ -241,6 +241,9 @@ int main(int argc, char **argv)
   buddy::rdma::DocaRdma doca_fabric(num_remotes, fabric_mem, fabric_len);
   for (int i = 0; i < num_remotes; i++) { doca_fabric.connect(i, rsock[i], rsrv[i]); close(rsock[i]); }
   doca_fabric.wait_connected();
+  // wait_connected only proves the local ctx is RUNNING. Sending before the peer finishes its own
+  // doca_rdma_connect gets no ACK and exhausts transport retries (IO_FAILED at send_err).
+  MPI_Barrier(MPI_COMM_WORLD);
 #endif
 
   buddy::dpu::proxy_cqs cqs = {
