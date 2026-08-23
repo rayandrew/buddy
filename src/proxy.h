@@ -285,6 +285,7 @@ class Proxy {
     const size_t d2d_depth;
     const size_t rx_depth;
     const size_t local_recv_len;   // local recv buffer size: h2d_size, or a tiny ctrl slot under LOCAL_DMA
+    const int poll_batch;          // completions drained per ibv_poll_cq (BUDDY_POLL_BATCH, default 1)
 
     ibv_mr *h2d_mr;
     ibv_mr *d2d_mr;
@@ -315,6 +316,7 @@ class Proxy {
     char *get_recv_buf(route rt);
 
     bool poll_recv_queue(std::list<blocked_req>& blocked_reqs);
+    void process_recv_wc(const ibv_wc& wc, std::list<blocked_req>& blocked_reqs);
     void poll_send_queue(std::list<blocked_req>& blocked_reqs);
 
     unsigned remote_idx_of(uint32_t qp_num);
