@@ -109,6 +109,8 @@ DocaRdma::DocaRdma(unsigned num_connections, char *mem, size_t mem_len)
   CHECK_DOCA(doca_rdma_set_grh_enabled(rdma, 1));
   CHECK_DOCA(doca_rdma_set_gid_index(rdma, rdma_gid()));
   CHECK_DOCA(doca_rdma_set_max_num_connections(rdma, num_connections));
+  // Match the ibverbs leg's rnr_retry=7 (infinite); the DOCA default is finite.
+  CHECK_DOCA(doca_rdma_set_rnr_retry_count(rdma, 7));
 
   CHECK_DOCA(doca_pe_create(&pe));
   CHECK_DOCA(doca_pe_connect_ctx(pe, ctx));
