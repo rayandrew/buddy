@@ -204,6 +204,10 @@ int main(int argc, char **argv)
   if (env && *env)
     config.quiet_time = strtod(env, NULL);
 
+  env = getenv("BUDDY_DOCA_EVENT_US");
+  if (env && *env)
+    config.doca_event_us = strtod(env, NULL);
+
   env = getenv("BUDDY_D2D_SIZE");
   if (env && *env)
     config.d2d_size = atoi(env);

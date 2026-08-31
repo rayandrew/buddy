@@ -40,6 +40,10 @@ class DocaRdma {
     // write + immediate: peer gets an OP_RECV completion carrying imm (consumes a posted recv).
     void write_imm(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint32_t imm, uint64_t wr_id);
     bool poll(completion *c);                        // drives pe_progress; false if none ready
+    // Arms the engine and sleeps until a completion arrives or timeout_s elapses. Only safe
+    // when the caller has nothing else to service, and the timeout bounds how long any other
+    // source waits. True if a completion is ready afterwards.
+    bool wait_idle(double timeout_s);
 
     void push(const completion &c) { completed.push(c); }   // used by callbacks
     void on_established() { established++; }                 // used by callbacks

@@ -299,11 +299,13 @@ void Proxy::fabric_credit(unsigned peer, uint32_t slot)
 }
 
 // Drain doca_rdma D2D completions: free sent buffers (send + ack on read), route received ones.
-void Proxy::fabric_poll(std::list<blocked_req>& blocklist)
+bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
 {
   int tid = omp_get_thread_num();
+  bool did_work = false;
   rdma::DocaRdma::completion c;
   while (doca_fabric->poll(&c)) {
+    did_work = true;
     if (c.op == rdma::DocaRdma::OP_SEND) {
       if (c.wr_id == FABRIC_CTRL) continue;        // READY/ACK control send
       auto id = send_buf_id::from_int(c.wr_id);    // push (send-mode) data flushed
@@ -364,6 +366,7 @@ void Proxy::fabric_poll(std::list<blocked_req>& blocklist)
       else { blocked_req br = {recv_rt, reader, omp_get_wtime()+config.timeout}; blocklist.push_back(br); }
     }
   }
+  return did_work;
 }
 #endif
 
@@ -713,7 +716,11 @@ void Proxy::rdma_loop()
 
       poll_send_queue(blocklist);
 #ifdef DOCA_FABRIC
-      fabric_poll(blocklist);
+      const bool fabric_work = fabric_poll(blocklist);
+      // Nothing anywhere: park on the engine instead of spinning. The timeout bounds how long the
+      // local queues wait, and 0 (the default) keeps the original busy-poll.
+      if (config.doca_event_us > 0 && !recv && !fabric_work && blocklist.empty())
+        doca_fabric->wait_idle(config.doca_event_us * 1e-6);
 #endif
     }
 

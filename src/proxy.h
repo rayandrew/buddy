@@ -28,6 +28,9 @@ struct ProxyConfig {
   unsigned bufcount_local = 2;
   double timeout = 60.0;
   double quiet_time = 1e-3;
+  // Microseconds to sleep on the DOCA engine when the whole pass found nothing. 0 keeps the
+  // busy-poll. Bounds how long the local queues wait, so keep it short.
+  double doca_event_us = 0.0;
   unsigned d2d_mode = D2D_SEND;   // 0 send (push), 1 read (pull), 2 write (push, one-sided)
 };
 
@@ -39,6 +42,7 @@ inline std::ostream& operator<<(std::ostream& os, const ProxyConfig& config)
   os << "d2d_size " << config.d2d_size << std::endl;
   os << "timeout " << config.timeout << std::endl;
   os << "quiet_time " << config.quiet_time << std::endl;
+  os << "doca_event_us " << config.doca_event_us << std::endl;
   os << "d2d_mode " << config.d2d_mode << std::endl;
   return os;
 }
@@ -275,7 +279,7 @@ class Proxy {
     char *fabric_mem;
     size_t fabric_stage;               // bytes in send/recv half = fabric slots * d2d_size
     size_t fabric_ctrl;                // control region (READY/ACK descriptors) = 2*fabric_stage
-    void fabric_poll(std::list<blocked_req>& blocked_reqs);
+    bool fabric_poll(std::list<blocked_req>& blocked_reqs);   // true if it processed anything
     void fabric_ack(unsigned peer, uint32_t slot, uint64_t id);
     void fabric_credit(unsigned peer, uint32_t slot);
 #endif

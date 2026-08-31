@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <endian.h>
+#include <poll.h>
 
 #include <doca_dev.h>
 #include <doca_rdma.h>
@@ -322,10 +323,30 @@ void DocaRdma::write_imm(unsigned conn_idx, size_t local_off, size_t remote_off,
 
 bool DocaRdma::poll(completion *c)
 {
-  doca_pe_progress(pe);
+  // Only touch the hardware when the software queue is dry. A drain loop calls this once per
+  // completion, and progressing on each of those repolls the CQ for completions already in hand.
+  if (completed.empty()) doca_pe_progress(pe);
   if (completed.empty()) return false;
   *c = completed.front(); completed.pop();
   return true;
+}
+
+bool DocaRdma::wait_idle(double timeout_s)
+{
+  if (!completed.empty()) return true;
+  doca_notification_handle_t handle;
+  if (doca_pe_get_notification_handle(pe, &handle) != DOCA_SUCCESS) return false;
+  if (doca_pe_request_notification(pe) != DOCA_SUCCESS) return false;
+
+  struct pollfd pfd = { handle, POLLIN, 0 };
+  struct timespec ts;
+  ts.tv_sec = (time_t)timeout_s;
+  ts.tv_nsec = (long)((timeout_s - (double)ts.tv_sec) * 1e9);
+  ppoll(&pfd, 1, &ts, NULL);
+
+  doca_pe_clear_notification(pe, handle);
+  while (doca_pe_progress(pe)) {}
+  return !completed.empty();
 }
 
 unsigned DocaRdma::conn_index_of(const struct doca_rdma_connection *conn)
