@@ -8,7 +8,8 @@
 
 #define IB_PORT 1
 #define GID_INDEX 0
-#define COUNT 1000
+// Was a hardcoded 1000. BUDDY_QUEUE_DEPTH now sets it, and the DOCA leg reads the same value.
+#define COUNT (buddy::queue_depth())
 
 // TODO: This needs be less than the link MTU. Currently on Sleipner it is 1500
 // but we should consider increasing it to 5000.

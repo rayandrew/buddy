@@ -21,7 +21,6 @@
 #define NUM_RDMA_TASKS 4096
 
 namespace buddy::rdma {
-
 static double now_seconds()
 {
   using namespace std::chrono;
@@ -161,15 +160,17 @@ DocaRdma::DocaRdma(unsigned num_connections, char *mem, size_t mem_len)
   require_task(doca_rdma_cap_task_write_is_supported(info), "write");
   require_task(doca_rdma_cap_task_write_imm_is_supported(info), "write_imm");
 
-  // Size the send queue to the task pool. Left unset it takes a library default that can sit far
-  // below NUM_RDMA_TASKS, so a burst returns DOCA_ERROR_FULL as a matter of course.
+  // Same queue depth as the ibverbs leg (both read BUDDY_QUEUE_DEPTH), so a comparison between
+  // the two transports is not really a comparison of whichever default each API happens to pick.
+  // Left unset, DOCA takes 128.
   uint32_t max_sq = 0, max_rq = 0;
   CHECK_DOCA(doca_rdma_cap_get_max_send_queue_size(info, &max_sq));
   CHECK_DOCA(doca_rdma_cap_get_max_recv_queue_size(info, &max_rq));
-  CHECK_DOCA(doca_rdma_set_send_queue_size(rdma, std::min<uint32_t>(NUM_RDMA_TASKS, max_sq)));
+  CHECK_DOCA(doca_rdma_set_send_queue_size(rdma, std::min<uint32_t>(buddy::queue_depth(), max_sq)));
   // mlx5_2 here reports a recv-queue maximum but rejects every value, one included. Sizing it is
   // an optimization, so take it when the device allows and keep the default when it does not.
-  const doca_error_t rq_rc = doca_rdma_set_recv_queue_size(rdma, std::min<uint32_t>(NUM_RDMA_TASKS, max_rq));
+  const doca_error_t rq_rc =
+      doca_rdma_set_recv_queue_size(rdma, std::min<uint32_t>(buddy::queue_depth(), max_rq));
   if (rq_rc != DOCA_SUCCESS && rq_rc != DOCA_ERROR_NOT_SUPPORTED)
     FAIL("doca " << doca_error_get_descr(rq_rc));
 

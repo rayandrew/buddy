@@ -23,4 +23,19 @@ inline double clock()
   return t.tv_sec + 1e-9*t.tv_nsec;
 }
 
+// Depth of every RDMA queue: ibverbs SRQ/CQ/QP work-request caps, and the DOCA send queue. Both
+// legs read this one value so a transport comparison is not a comparison of two defaults.
+//
+// It bounds bufcount_remote, which is a *count of posted receives*: d2d_depth is
+// bufcount_remote * peers * threads, and exceeding this makes ibv_post_srq_recv return ENOMEM.
+inline unsigned queue_depth()
+{
+  static const unsigned n = [] {
+    const char *e = getenv("BUDDY_QUEUE_DEPTH");
+    const int v = (e && *e) ? atoi(e) : 0;
+    return v > 0 ? (unsigned)v : 1000u;
+  }();
+  return n;
+}
+
 } // namespace buddy
