@@ -335,4 +335,8 @@ class Proxy {
     void print_counters();
 };
 
+// Threads the proxy loop runs on. Declared here because the DOCA fabric staging is sized before
+// the Proxy exists and has to use the same count.
+int get_num_threads();
+
 } // namespace buddy::dpu

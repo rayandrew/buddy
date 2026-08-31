@@ -239,7 +239,10 @@ int main(int argc, char **argv)
 
 #ifdef DOCA_FABRIC
   // D2D over doca_rdma. fabric_mem = send half | recv half | ctrl (READY/ACK descriptors).
-  size_t fabric_slots = (size_t)config.bufcount_remote * num_remotes;
+  // Same product as d2d_depth in the Proxy: without the thread term the staging is short and the
+  // recv slots index past it.
+  size_t fabric_slots =
+      (size_t)config.bufcount_remote * num_remotes * buddy::dpu::get_num_threads();
   size_t fabric_len = 2 * fabric_slots * config.d2d_size + 2 * fabric_slots * 64;
   char *fabric_mem = new char[fabric_len];
   buddy::rdma::DocaRdma doca_fabric(num_remotes, fabric_mem, fabric_len);

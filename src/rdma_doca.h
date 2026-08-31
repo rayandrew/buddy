@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <mutex>
 #include <queue>
 
 struct doca_dev;
@@ -65,6 +66,9 @@ class DocaRdma {
     doca_mmap **remote_mmap;             // peer memory imported for read/write
     char **remote_base;                  // peer mem base addr (for remote offsets)
     std::queue<completion> completed;
+    // One progress engine shared by every proxy thread, as the ibverbs leg shares one CQ. Held
+    // across submit and progress; completion callbacks run inside progress and must not retake it.
+    std::mutex mu;
     unsigned established = 0;
     bool failed = false;
 };

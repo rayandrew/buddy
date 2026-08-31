@@ -268,6 +268,7 @@ void DocaRdma::wait_connected(double timeout_s)
 
 void DocaRdma::send_imm(unsigned conn_idx, uint32_t imm, size_t offset, size_t len, uint64_t wr_id)
 {
+  std::lock_guard<std::mutex> lk(mu);
   struct doca_buf *src;
   DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_data(inv, mmap, mem + offset, len, &src));
   union doca_data tu; tu.u64 = wr_id;
@@ -278,6 +279,7 @@ void DocaRdma::send_imm(unsigned conn_idx, uint32_t imm, size_t offset, size_t l
 
 void DocaRdma::post_recv(size_t offset, size_t len, uint64_t wr_id)
 {
+  std::lock_guard<std::mutex> lk(mu);
   struct doca_buf *dst;
   DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, mmap, mem + offset, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
@@ -288,6 +290,7 @@ void DocaRdma::post_recv(size_t offset, size_t len, uint64_t wr_id)
 
 void DocaRdma::read(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id)
 {
+  std::lock_guard<std::mutex> lk(mu);
   struct doca_buf *src, *dst;                 // src = peer memory, dst = our memory
   DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &src));
   DOCA_SUBMIT(pe, doca_buf_set_data(src, remote_base[conn_idx]+remote_off, len));
@@ -300,6 +303,7 @@ void DocaRdma::read(unsigned conn_idx, size_t local_off, size_t remote_off, size
 
 void DocaRdma::write(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id)
 {
+  std::lock_guard<std::mutex> lk(mu);
   struct doca_buf *src, *dst;                 // src = our memory, dst = peer memory
   DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &src));
   DOCA_SUBMIT(pe, doca_buf_set_data(src, mem+local_off, len));
@@ -312,6 +316,7 @@ void DocaRdma::write(unsigned conn_idx, size_t local_off, size_t remote_off, siz
 
 void DocaRdma::write_imm(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint32_t imm, uint64_t wr_id)
 {
+  std::lock_guard<std::mutex> lk(mu);
   struct doca_buf *src, *dst;
   DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &src));
   DOCA_SUBMIT(pe, doca_buf_set_data(src, mem+local_off, len));
@@ -324,6 +329,7 @@ void DocaRdma::write_imm(unsigned conn_idx, size_t local_off, size_t remote_off,
 
 bool DocaRdma::poll(completion *c)
 {
+  std::lock_guard<std::mutex> lk(mu);
   // Only touch the hardware when the software queue is dry. A drain loop calls this once per
   // completion, and progressing on each of those repolls the CQ for completions already in hand.
   if (completed.empty()) doca_pe_progress(pe);
@@ -334,6 +340,7 @@ bool DocaRdma::poll(completion *c)
 
 bool DocaRdma::wait_idle(double timeout_s)
 {
+  std::lock_guard<std::mutex> lk(mu);
   if (!completed.empty()) return true;
   doca_notification_handle_t handle;
   if (doca_pe_get_notification_handle(pe, &handle) != DOCA_SUCCESS) return false;

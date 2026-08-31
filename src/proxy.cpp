@@ -130,7 +130,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 #ifdef DOCA_FABRIC
   , doca_fabric(doca_fabric)
   , fabric_mem(fabric_mem)
-  , num_threads(1)                     // one doca_rdma progress engine
+  , num_threads(get_num_threads())
 #elif defined(LOCAL_DMA)
   , num_threads(1)                     // single owner of the shared D2H staging ring
 #else
