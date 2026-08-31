@@ -72,9 +72,15 @@ int main(int argc, char **argv)
       // Counted globally, never per thread: any thread may drain any other thread's completion.
       while (done.load() < total)
         if (dr.poll(&c)) {
-          if (server && (c.op != rdma::DocaRdma::OP_RECV ||
-                         c.imm != (uint32_t)(c.wr_id & 0xffff)))
-            bad++;
+          // A message lands in whichever receive buffer was free, so wr_id names the slot and says
+          // nothing about which message arrived. Check the payload against the sender's immediate.
+          if (server) {
+            const unsigned char *p =
+                (const unsigned char *)mem + slots * SLOT + (size_t)c.wr_id * SLOT;
+            if (c.op != rdma::DocaRdma::OP_RECV || c.len != SLOT ||
+                *p != (unsigned char)(c.imm & 0xff))
+              bad++;
+          }
           done++;
         }
     });
