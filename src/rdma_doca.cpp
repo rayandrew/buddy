@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <endian.h>
@@ -18,6 +20,35 @@
 #define NUM_RDMA_TASKS 4096
 
 namespace buddy::rdma {
+
+static double now_seconds()
+{
+  using namespace std::chrono;
+  return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
+// The task pools, the buf inventory and the send queue are all finite. DOCA reports exhaustion of
+// each as a retryable status, not a failure: draining the progress engine releases all three. The
+// deadline turns a genuinely wedged queue into a diagnosable error instead of a hang.
+static const double kDrainTimeout = 60.0;
+
+static bool drain_and_retry(struct doca_pe *pe, doca_error_t err, double *deadline)
+{
+  if (err != DOCA_ERROR_FULL && err != DOCA_ERROR_NO_MEMORY && err != DOCA_ERROR_AGAIN) return false;
+  const double now = now_seconds();
+  if (*deadline == 0.0) *deadline = now + kDrainTimeout;
+  else if (now > *deadline) return false;
+  doca_pe_progress(pe);
+  return true;
+}
+
+// Submit-side counterpart to CHECK_DOCA: retries the transient statuses above instead of aborting.
+#define DOCA_SUBMIT(pe, a) do {                                                       \
+    doca_error_t _err; double _dl = 0.0;                                              \
+    while ((_err = (a)) != DOCA_SUCCESS)                                              \
+      if (!drain_and_retry(pe, _err, &_dl))                                           \
+        FAIL("doca " << doca_error_get_descr(_err));                                  \
+  } while (0)
 
 static const char *rdma_ibdev() { const char *e = getenv("BUDDY_RDMA_DEV"); return e && *e ? e : "mlx5_2"; }
 static uint32_t rdma_gid()      { const char *e = getenv("BUDDY_GID_INDEX"); return e && *e ? atoi(e) : 0; }
@@ -95,6 +126,16 @@ static void write_imm_cb(struct doca_rdma_task_write_imm *task, union doca_data 
 static void write_imm_err(struct doca_rdma_task_write_imm *task, union doca_data, union doca_data)
 { FAIL("doca_rdma write_imm failed: " << doca_error_get_descr(doca_task_get_status(doca_rdma_task_write_imm_as_task(task)))); }
 
+static void conn_established_cb(struct doca_rdma_connection *, union doca_data, union doca_data cu)
+{ ((DocaRdma *)cu.ptr)->on_established(); }
+static void conn_failure_cb(struct doca_rdma_connection *, union doca_data, union doca_data cu)
+{ ((DocaRdma *)cu.ptr)->on_failed(); }
+static void conn_disconnect_cb(struct doca_rdma_connection *, union doca_data, union doca_data cu)
+{ ((DocaRdma *)cu.ptr)->on_failed(); }
+
+static void require_task(doca_error_t rc, const char *what)
+{ if (rc != DOCA_SUCCESS) FAIL("doca rdma " << what << " unsupported here: " << doca_error_get_descr(rc)); }
+
 DocaRdma::DocaRdma(unsigned num_connections, char *mem, size_t mem_len)
   : num_connections(num_connections)
   , mem(mem)
@@ -111,6 +152,28 @@ DocaRdma::DocaRdma(unsigned num_connections, char *mem, size_t mem_len)
   CHECK_DOCA(doca_rdma_set_max_num_connections(rdma, num_connections));
   // Match the ibverbs leg's rnr_retry=7 (infinite); the DOCA default is finite.
   CHECK_DOCA(doca_rdma_set_rnr_retry_count(rdma, 7));
+
+  const struct doca_devinfo *info = doca_dev_as_devinfo(dev);
+  require_task(doca_rdma_cap_task_send_imm_is_supported(info), "send_imm");
+  require_task(doca_rdma_cap_task_receive_is_supported(info), "receive");
+  require_task(doca_rdma_cap_task_read_is_supported(info), "read");
+  require_task(doca_rdma_cap_task_write_is_supported(info), "write");
+  require_task(doca_rdma_cap_task_write_imm_is_supported(info), "write_imm");
+
+  // Size the send queue to the task pool. Left unset it takes a library default that can sit far
+  // below NUM_RDMA_TASKS, so a burst returns DOCA_ERROR_FULL as a matter of course.
+  uint32_t max_sq = 0, max_rq = 0;
+  CHECK_DOCA(doca_rdma_cap_get_max_send_queue_size(info, &max_sq));
+  CHECK_DOCA(doca_rdma_cap_get_max_recv_queue_size(info, &max_rq));
+  CHECK_DOCA(doca_rdma_set_send_queue_size(rdma, std::min<uint32_t>(NUM_RDMA_TASKS, max_sq)));
+  // mlx5_2 here reports a recv-queue maximum but rejects every value, one included. Sizing it is
+  // an optimization, so take it when the device allows and keep the default when it does not.
+  const doca_error_t rq_rc = doca_rdma_set_recv_queue_size(rdma, std::min<uint32_t>(NUM_RDMA_TASKS, max_rq));
+  if (rq_rc != DOCA_SUCCESS && rq_rc != DOCA_ERROR_NOT_SUPPORTED)
+    FAIL("doca " << doca_error_get_descr(rq_rc));
+
+  CHECK_DOCA(doca_rdma_set_connection_state_callbacks(rdma, NULL, conn_established_cb,
+                                                      conn_failure_cb, conn_disconnect_cb));
 
   CHECK_DOCA(doca_pe_create(&pe));
   CHECK_DOCA(doca_pe_connect_ctx(pe, ctx));
@@ -138,7 +201,13 @@ DocaRdma::DocaRdma(unsigned num_connections, char *mem, size_t mem_len)
 
 DocaRdma::~DocaRdma()
 {
+  // Stop is asynchronous while tasks are still in flight; the engine has to be driven until the
+  // ctx reports idle or the destroys below fail with DOCA_ERROR_IN_USE.
   doca_ctx_stop(ctx);
+  enum doca_ctx_states cs;
+  const double deadline = now_seconds() + kDrainTimeout;
+  do { doca_pe_progress(pe); doca_ctx_get_state(ctx, &cs); }
+  while (cs != DOCA_CTX_STATE_IDLE && now_seconds() < deadline);
   doca_buf_inventory_destroy(inv);
   doca_mmap_destroy(mmap);
   doca_rdma_destroy(rdma);
@@ -179,66 +248,76 @@ void DocaRdma::connect(unsigned idx, int sock, bool is_server)
   (void)is_server;
 }
 
-void DocaRdma::wait_connected()
+void DocaRdma::wait_connected(double timeout_s)
 {
+  // The established callback never fires on the export/connect path (it belongs to the RDMA CM
+  // flow), so a RUNNING ctx plus the caller's own barrier is all the readiness signal there is.
+  // The timeout only keeps a peer that never connects from hanging here forever.
   enum doca_ctx_states cs;
-  do { doca_pe_progress(pe); doca_ctx_get_state(ctx, &cs); } while (cs != DOCA_CTX_STATE_RUNNING);
+  const double deadline = now_seconds() + timeout_s;
+  for (;;) {
+    doca_pe_progress(pe);
+    doca_ctx_get_state(ctx, &cs);
+    if (failed) FAIL("doca rdma connection failed before it was established");
+    if (cs == DOCA_CTX_STATE_RUNNING) return;
+    if (now_seconds() > deadline) FAIL("doca rdma ctx did not reach RUNNING in " << timeout_s << " s");
+  }
 }
 
 void DocaRdma::send_imm(unsigned conn_idx, uint32_t imm, size_t offset, size_t len, uint64_t wr_id)
 {
   struct doca_buf *src;
-  CHECK_DOCA(doca_buf_inventory_buf_get_by_data(inv, mmap, mem + offset, len, &src));
+  DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_data(inv, mmap, mem + offset, len, &src));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_send_imm *task;
-  CHECK_DOCA(doca_rdma_task_send_imm_allocate_init(rdma, conns[conn_idx], src, htobe32(imm), tu, &task));
-  CHECK_DOCA(doca_task_submit(doca_rdma_task_send_imm_as_task(task)));
+  DOCA_SUBMIT(pe, doca_rdma_task_send_imm_allocate_init(rdma, conns[conn_idx], src, htobe32(imm), tu, &task));
+  DOCA_SUBMIT(pe, doca_task_submit(doca_rdma_task_send_imm_as_task(task)));
 }
 
 void DocaRdma::post_recv(size_t offset, size_t len, uint64_t wr_id)
 {
   struct doca_buf *dst;
-  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, mmap, mem + offset, len, &dst));
+  DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, mmap, mem + offset, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_receive *task;
-  CHECK_DOCA(doca_rdma_task_receive_allocate_init(rdma, dst, tu, &task));
-  CHECK_DOCA(doca_task_submit(doca_rdma_task_receive_as_task(task)));
+  DOCA_SUBMIT(pe, doca_rdma_task_receive_allocate_init(rdma, dst, tu, &task));
+  DOCA_SUBMIT(pe, doca_task_submit(doca_rdma_task_receive_as_task(task)));
 }
 
 void DocaRdma::read(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id)
 {
   struct doca_buf *src, *dst;                 // src = peer memory, dst = our memory
-  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &src));
-  CHECK_DOCA(doca_buf_set_data(src, remote_base[conn_idx]+remote_off, len));
-  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &dst));
+  DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &src));
+  DOCA_SUBMIT(pe, doca_buf_set_data(src, remote_base[conn_idx]+remote_off, len));
+  DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_read *task;
-  CHECK_DOCA(doca_rdma_task_read_allocate_init(rdma, conns[conn_idx], src, dst, tu, &task));
-  CHECK_DOCA(doca_task_submit(doca_rdma_task_read_as_task(task)));
+  DOCA_SUBMIT(pe, doca_rdma_task_read_allocate_init(rdma, conns[conn_idx], src, dst, tu, &task));
+  DOCA_SUBMIT(pe, doca_task_submit(doca_rdma_task_read_as_task(task)));
 }
 
 void DocaRdma::write(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id)
 {
   struct doca_buf *src, *dst;                 // src = our memory, dst = peer memory
-  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &src));
-  CHECK_DOCA(doca_buf_set_data(src, mem+local_off, len));
-  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
+  DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &src));
+  DOCA_SUBMIT(pe, doca_buf_set_data(src, mem+local_off, len));
+  DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_write *task;
-  CHECK_DOCA(doca_rdma_task_write_allocate_init(rdma, conns[conn_idx], src, dst, tu, &task));
-  CHECK_DOCA(doca_task_submit(doca_rdma_task_write_as_task(task)));
+  DOCA_SUBMIT(pe, doca_rdma_task_write_allocate_init(rdma, conns[conn_idx], src, dst, tu, &task));
+  DOCA_SUBMIT(pe, doca_task_submit(doca_rdma_task_write_as_task(task)));
 }
 
 void DocaRdma::write_imm(unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint32_t imm, uint64_t wr_id)
 {
   struct doca_buf *src, *dst;
-  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &src));
-  CHECK_DOCA(doca_buf_set_data(src, mem+local_off, len));
-  CHECK_DOCA(doca_buf_inventory_buf_get_by_addr(inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
+  DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, mmap, mem+local_off, len, &src));
+  DOCA_SUBMIT(pe, doca_buf_set_data(src, mem+local_off, len));
+  DOCA_SUBMIT(pe, doca_buf_inventory_buf_get_by_addr(inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_write_imm *task;
-  CHECK_DOCA(doca_rdma_task_write_imm_allocate_init(rdma, conns[conn_idx], src, dst, htobe32(imm), tu, &task));
-  CHECK_DOCA(doca_task_submit(doca_rdma_task_write_imm_as_task(task)));
+  DOCA_SUBMIT(pe, doca_rdma_task_write_imm_allocate_init(rdma, conns[conn_idx], src, dst, htobe32(imm), tu, &task));
+  DOCA_SUBMIT(pe, doca_task_submit(doca_rdma_task_write_imm_as_task(task)));
 }
 
 bool DocaRdma::poll(completion *c)

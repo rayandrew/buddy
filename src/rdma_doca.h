@@ -29,7 +29,8 @@ class DocaRdma {
 
     // connect one peer: export our blob, swap over sock, connect; call for each peer.
     void connect(unsigned idx, int sock, bool is_server);
-    void wait_connected();                          // pe_progress until ctx RUNNING
+    // pe_progress until ctx RUNNING; aborts rather than hanging if that never happens.
+    void wait_connected(double timeout_s = 60.0);
 
     void send_imm(unsigned conn_idx, uint32_t imm, size_t offset, size_t len, uint64_t wr_id);
     void post_recv(size_t offset, size_t len, uint64_t wr_id);
@@ -41,6 +42,8 @@ class DocaRdma {
     bool poll(completion *c);                        // drives pe_progress; false if none ready
 
     void push(const completion &c) { completed.push(c); }   // used by callbacks
+    void on_established() { established++; }                 // used by callbacks
+    void on_failed() { failed = true; }                      // used by callbacks
     unsigned conn_index_of(const struct doca_rdma_connection *c);
 
   private:
@@ -58,6 +61,8 @@ class DocaRdma {
     doca_mmap **remote_mmap;             // peer memory imported for read/write
     char **remote_base;                  // peer mem base addr (for remote offsets)
     std::queue<completion> completed;
+    unsigned established = 0;
+    bool failed = false;
 };
 
 } // namespace buddy::rdma
