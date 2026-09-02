@@ -241,11 +241,11 @@ int main(int argc, char **argv)
   // D2D over doca_rdma. fabric_mem = send half | recv half | ctrl (READY/ACK descriptors).
   // Same product as d2d_depth in the Proxy: without the thread term the staging is short and the
   // recv slots index past it.
-  size_t fabric_slots =
-      (size_t)config.bufcount_remote * num_remotes * buddy::dpu::get_num_threads();
+  const unsigned fabric_lanes = (unsigned)buddy::dpu::get_num_threads();
+  size_t fabric_slots = (size_t)config.bufcount_remote * num_remotes * fabric_lanes;
   size_t fabric_len = 2 * fabric_slots * config.d2d_size + 2 * fabric_slots * 64;
   char *fabric_mem = new char[fabric_len];
-  buddy::rdma::DocaRdma doca_fabric(num_remotes, fabric_mem, fabric_len);
+  buddy::rdma::DocaRdma doca_fabric(num_remotes, fabric_mem, fabric_len, fabric_lanes);
   for (int i = 0; i < num_remotes; i++) { doca_fabric.connect(i, rsock[i], rsrv[i]); close(rsock[i]); }
   doca_fabric.wait_connected();
   // wait_connected only proves the local ctx is RUNNING. Sending before the peer finishes its own

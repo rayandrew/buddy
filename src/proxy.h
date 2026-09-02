@@ -274,7 +274,7 @@ class Proxy {
 #endif
 #ifdef DOCA_FABRIC
     // D2D over doca_rdma. Aggregated buffers are staged into fabric_mem (send half | recv half),
-    // one send slot / recv slot per (remote, repid). Proxy is single-threaded (one doca_rdma pe).
+    // one send slot / recv slot per (thread, remote, repid), matching the lane that owns them.
     rdma::DocaRdma *doca_fabric;
     char *fabric_mem;
     size_t fabric_stage;               // bytes in send/recv half = fabric slots * d2d_size
@@ -282,6 +282,9 @@ class Proxy {
     bool fabric_poll(std::list<blocked_req>& blocked_reqs);   // true if it processed anything
     void fabric_ack(unsigned peer, uint32_t slot, uint64_t id);
     void fabric_credit(unsigned peer, uint32_t slot);
+    // Inverse of the flush_remote slot encoding: which lane owns this fabric slot.
+    unsigned fabric_lane(uint32_t slot) const
+    { return slot / (num_remotes * config.bufcount_remote); }
 #endif
 
     const int num_threads;

@@ -287,14 +287,15 @@ void Proxy::fabric_ack(unsigned peer, uint32_t slot, uint64_t id)
 {
   uint64_t *a = (uint64_t *)(fabric_mem + fabric_ctrl + (size_t)(d2d_depth + slot)*64);
   *a = id;
-  doca_fabric->send_imm(peer, IMM_D2D_ACK, fabric_ctrl + (size_t)(d2d_depth+slot)*64, sizeof(uint64_t), FABRIC_CTRL);
+  doca_fabric->send_imm(omp_get_thread_num(), peer, IMM_D2D_ACK,
+      fabric_ctrl + (size_t)(d2d_depth+slot)*64, sizeof(uint64_t), FABRIC_CTRL);
 }
 
 // write-mode credit: tell the sender its landing slot is free. The slot rides in the imm (the
 // recv half doubles as the write-landing region, so a payload buffer there would be corrupted).
 void Proxy::fabric_credit(unsigned peer, uint32_t slot)
 {
-  doca_fabric->send_imm(peer, (slot << IMM_SLOT_SHIFT) | IMM_D2D_CREDIT,
+  doca_fabric->send_imm(omp_get_thread_num(), peer, (slot << IMM_SLOT_SHIFT) | IMM_D2D_CREDIT,
       fabric_ctrl + (size_t)(d2d_depth + slot)*64, sizeof(uint32_t), FABRIC_CTRL);
 }
 
@@ -304,7 +305,7 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
   int tid = omp_get_thread_num();
   bool did_work = false;
   rdma::DocaRdma::completion c;
-  while (doca_fabric->poll(&c)) {
+  while (doca_fabric->poll(tid, &c)) {
     did_work = true;
     if (c.op == rdma::DocaRdma::OP_SEND) {
       if (c.wr_id == FABRIC_CTRL) continue;        // READY/ACK control send
@@ -336,7 +337,7 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
       d2d_desc desc;
       memcpy(&desc, slotbuf, sizeof(desc));
       pending_reads[c.wr_id] = { c.conn, desc.id, desc.len };
-      doca_fabric->read(c.conn, fabric_stage + (size_t)c.wr_id*config.d2d_size, desc.addr, desc.len, c.wr_id);
+      doca_fabric->read(tid, c.conn, fabric_stage + (size_t)c.wr_id*config.d2d_size, desc.addr, desc.len, c.wr_id);
     } else if (tag == IMM_D2D_ACK) {               // pull: our sent buffer was read -> free it
       uint64_t fid; memcpy(&fid, slotbuf, sizeof(fid));
       auto id = send_buf_id::from_int(fid);
@@ -355,7 +356,10 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
              blocklist.push_back(br); }
     } else if (tag == IMM_D2D_CREDIT) {            // push-write: our landing slot (imm>>8) is free
       uint32_t slot = c.imm >> IMM_SLOT_SHIFT;
-      d2d_send[0].mark_complete(slot / config.bufcount_remote, slot % config.bufcount_remote);
+      // Inverse of the flush_remote encoding.
+      const unsigned per_peer = config.bufcount_remote;
+      d2d_send[slot / (num_remotes * per_peer)]
+          .mark_complete((slot / per_peer) % num_remotes, slot % per_peer);
       post_recv(route::make_remote(c.wr_id));
     } else {                                       // push (send-mode) data in recv slot
       in_counters[tid].count_remote++;
@@ -720,7 +724,7 @@ void Proxy::rdma_loop()
       // Nothing anywhere: park on the engine instead of spinning. The timeout bounds how long the
       // local queues wait, and 0 (the default) keeps the original busy-poll.
       if (config.doca_event_us > 0 && !recv && !fabric_work && blocklist.empty())
-        doca_fabric->wait_idle(config.doca_event_us * 1e-6);
+        doca_fabric->wait_idle(tid, config.doca_event_us * 1e-6);
 #endif
     }
 
@@ -812,6 +816,12 @@ void Proxy::print_counters()
     in_total.count_remote += in_counters[tid].count_remote;
     in_total.bytes_local += in_counters[tid].bytes_local;
     in_total.bytes_remote += in_counters[tid].bytes_remote;
+
+    // Per thread, not just the total: an idle lane is pure polling overhead, and the sum hides it.
+    std::cout << "lane\t" << tid << "\tin_remote\t" << in_counters[tid].count_remote
+              << "\tout_remote\t" << thread_out.count_remote
+              << "\tin_local\t" << in_counters[tid].count_local
+              << "\tout_local\t" << thread_out.count_local << std::endl;
   }
 
   int rank;
@@ -885,7 +895,10 @@ void Proxy::post_recv(route rt)
 {
 #ifdef DOCA_FABRIC
   if (rt.remote) {                     // D2D recvs land in the fabric recv half
-    doca_fabric->post_recv(fabric_stage + (size_t)rt.idx*config.d2d_size, config.d2d_size, rt.idx);
+    // The slot decides the lane, not the caller: the initial posting runs before the parallel
+    // region, and a lane can only complete a receive it posted itself.
+    doca_fabric->post_recv(fabric_lane(rt.idx), fabric_stage + (size_t)rt.idx*config.d2d_size,
+        config.d2d_size, rt.idx);
     return;
   }
 #endif
@@ -1012,20 +1025,21 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
   char *buf = (char *)d2d_send[tid].mr()->addr + d2d_send[tid].offset(idx, repid);
 #ifdef DOCA_FABRIC
   // all-DOCA: stage into the send half, then push (send) or advertise for pull (read).
-  unsigned s = idx * config.bufcount_remote + repid;
+  // Without the tid term two threads sharing a (peer, repid) stage into the same bytes.
+  unsigned s = (tid * num_remotes + idx) * config.bufcount_remote + repid;
   size_t send_off = (size_t)s * config.d2d_size;
   memcpy(fabric_mem + send_off, buf, size);
   if (config.d2d_mode == D2D_READ) {
     // pull: peer reads our send slot; buffer stays FLUSHING until it ACKs.
     d2d_desc *desc = (d2d_desc *)(fabric_mem + fabric_ctrl + (size_t)s*64);
     *desc = { .addr = send_off, .id = id.as_int(), .rkey = 0, .len = (uint32_t)size };
-    doca_fabric->send_imm(idx, IMM_D2D_READY, fabric_ctrl + (size_t)s*64, sizeof(d2d_desc), FABRIC_CTRL);
+    doca_fabric->send_imm(tid, idx, IMM_D2D_READY, fabric_ctrl + (size_t)s*64, sizeof(d2d_desc), FABRIC_CTRL);
   } else if (config.d2d_mode == D2D_WRITE) {
     // push one-sided: write into the peer's recv slot s + imm(slot); freed on CREDIT.
-    doca_fabric->write_imm(idx, send_off, fabric_stage + (size_t)s*config.d2d_size, size,
+    doca_fabric->write_imm(tid, idx, send_off, fabric_stage + (size_t)s*config.d2d_size, size,
         (s << IMM_SLOT_SHIFT) | IMM_D2D_WRITE, FABRIC_CTRL);
   } else {
-    doca_fabric->send_imm(idx, IMM_D2D_RDMA, send_off, size, id.as_int());   // push (send)
+    doca_fabric->send_imm(tid, idx, IMM_D2D_RDMA, send_off, size, id.as_int());   // push (send)
   }
 #else
   if (config.d2d_mode == D2D_READ) {
