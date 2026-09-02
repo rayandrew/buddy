@@ -113,8 +113,8 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 #ifdef LOCAL_DMA
     dma::Engine *dma_engine,
 #endif
-#ifdef DOCA_FABRIC
-    rdma::DocaRdma *doca_fabric, char *fabric_mem,
+#ifdef BUDDY_FABRIC
+    rdma::Fabric *doca_fabric, char *fabric_mem,
 #endif
     int *ranks, route *routing_table)
   : config(config)
@@ -127,7 +127,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 #ifdef LOCAL_DMA
   , dma_engine(dma_engine)
 #endif
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
   , doca_fabric(doca_fabric)
   , fabric_mem(fabric_mem)
   , num_threads(get_num_threads())
@@ -190,8 +190,8 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
 
   // write mode (ibverbs only): a separate landing region (peers RDMA_WRITE here); one disjoint
   // sub-region of slots_per_peer slots per peer, mirroring each sender's per-thread bufcount bufs.
-  // DOCA_FABRIC writes into the peer's recv half instead, so it needs none of this.
-#ifndef DOCA_FABRIC
+  // BUDDY_FABRIC writes into the peer's recv half instead, so it needs none of this.
+#ifndef BUDDY_FABRIC
   if (config.d2d_mode == D2D_WRITE && num_remotes) {
     slots_per_peer = config.bufcount_remote * num_threads;
     size_t total_landing = (size_t)config.d2d_size * slots_per_peer * num_remotes;
@@ -208,7 +208,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     std::cout << " " << ranks[i];
   std::cout << std::endl;
 
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
   fabric_stage = (size_t)d2d_depth * config.d2d_size;   // recv half starts here
   fabric_ctrl = 2 * fabric_stage;                        // ctrl slots: READY at s, ACK at d2d_depth+r
 #endif
@@ -217,7 +217,7 @@ Proxy::Proxy(ProxyConfig config, proxy_cqs cqs, unsigned num_clients,
     post_recv(route::make_local(i));
 
   for (uint32_t i = 0; i < d2d_depth; i++)
-    post_recv(route::make_remote(i));                    // -> fabric under DOCA_FABRIC
+    post_recv(route::make_remote(i));                    // -> fabric under BUDDY_FABRIC
 
   TRACE(1, "trace on");
 }
@@ -281,7 +281,7 @@ void Proxy::dma_xfer(unsigned client, uint32_t offset, uint32_t len, dma::direct
 }
 #endif
 
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
 unsigned Proxy::lane_of_thread(unsigned tid) const
 {
   const unsigned n = doca_fabric->lanes_count();
@@ -310,16 +310,16 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
 {
   int tid = omp_get_thread_num();
   bool did_work = false;
-  rdma::DocaRdma::completion c;
+  rdma::Fabric::completion c;
   while (doca_fabric->poll(lane_of_thread(tid), &c)) {
     did_work = true;
-    if (c.op == rdma::DocaRdma::OP_SEND) {
+    if (c.op == rdma::Fabric::OP_SEND) {
       if (c.wr_id == FABRIC_CTRL) continue;        // READY/ACK control send
       auto id = send_buf_id::from_int(c.wr_id);    // push (send-mode) data flushed
       d2d_send[id.tid].mark_complete(id.rt.idx, id.repid);
       continue;
     }
-    if (c.op == rdma::DocaRdma::OP_READ) {         // pull: bulk arrived in recv slot c.wr_id
+    if (c.op == rdma::Fabric::OP_READ) {         // pull: bulk arrived in recv slot c.wr_id
       auto &pr = pending_reads[c.wr_id];
       in_counters[tid].count_remote++;
       in_counters[tid].bytes_remote += pr.len;
@@ -334,7 +334,7 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
       }
       continue;
     }
-    if (c.op == rdma::DocaRdma::OP_WRITE) continue; // write-imm sent; freed on CREDIT
+    if (c.op == rdma::Fabric::OP_WRITE) continue; // write-imm sent; freed on CREDIT
 
     // OP_RECV: tag in the low byte; write-imm packs the landing slot in the high bits
     uint32_t tag = c.imm & IMM_TAG_MASK;
@@ -417,7 +417,7 @@ void Proxy::poll_send_queue(std::list<blocked_req>& blocklist)
         if (local_qps[idx].get_qp()->qp_num == wc[i].qp_num)
           std::cerr << "destination: rank " << local_idx_to_rank[idx] << " (local idx " << idx << ")" << std::endl;
 
-      for (unsigned idx = 0; remote_qps && idx < num_remotes; idx++)   // remote_qps is null under DOCA_FABRIC (D2D is DocaRdma) -> don't deref
+      for (unsigned idx = 0; remote_qps && idx < num_remotes; idx++)   // remote_qps is null under BUDDY_FABRIC (D2D is DocaRdma) -> don't deref
         if (remote_qps[idx].get_qp()->qp_num == wc[i].qp_num)
           std::cerr << "destination: remote dpu " << idx << std::endl;
 
@@ -642,7 +642,7 @@ void Proxy::rdma_loop()
 {
   quit_counter = 0;
 
-#ifndef DOCA_FABRIC
+#ifndef BUDDY_FABRIC
   if (config.d2d_mode == D2D_WRITE && num_remotes)   // ibverbs landing exchange; DOCA writes to recv half
     d2d_write_exchange();
 #endif
@@ -699,7 +699,7 @@ void Proxy::rdma_loop()
       while (req != blocklist.end()) {
         if (route_reqs(req->reqbuf, blocklist)) {
           if (req->needs_ack) {
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
             if (config.d2d_mode == D2D_WRITE) fabric_credit(req->ack_peer, (uint32_t)req->ack_id);
             else fabric_ack(req->ack_peer, req->recv_rt.idx, req->ack_id);
 #else
@@ -725,7 +725,7 @@ void Proxy::rdma_loop()
       }
 
       poll_send_queue(blocklist);
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
       const bool fabric_work = fabric_poll(blocklist);
       // Nothing anywhere: park on the engine instead of spinning. The timeout bounds how long the
       // local queues wait, and 0 (the default) keeps the original busy-poll.
@@ -899,7 +899,7 @@ char *Proxy::get_recv_buf(route rt)
 
 void Proxy::post_recv(route rt)
 {
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
   if (rt.remote) {                     // D2D recvs land in the fabric recv half
     // The slot decides the lane, not the caller: the initial posting runs before the parallel
     // region, and a lane can only complete a receive it posted itself.
@@ -1029,7 +1029,7 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
 
   TRACE(1, "send to remote " << idx << " size " << size << " thread " << tid);
   char *buf = (char *)d2d_send[tid].mr()->addr + d2d_send[tid].offset(idx, repid);
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
   // all-DOCA: stage into the send half, then push (send) or advertise for pull (read).
   // Without the tid term two threads sharing a (peer, repid) stage into the same bytes.
   unsigned s = (tid * num_remotes + idx) * config.bufcount_remote + repid;

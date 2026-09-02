@@ -142,7 +142,7 @@ int main(int argc, char **argv)
 
   // Assumption: ranks on same node are adjacent
   // Connect all DPU pairs
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
   int *rsock = new int[num_remotes]; bool *rsrv = new bool[num_remotes];   // deferred to DocaRdma
   buddy::rdma::QP *remote_qps = nullptr;
 #else
@@ -156,7 +156,7 @@ int main(int argc, char **argv)
     buddy::full_write(socket, (char *)&local_node, sizeof(local_node));
     buddy::full_write(socket, (char *)&node, sizeof(node));
 
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
     rsock[node] = socket; rsrv[node] = false;
 #else
     new (&remote_qps[node]) buddy::rdma::QP(remote_cqs, socket, false);
@@ -174,7 +174,7 @@ int main(int argc, char **argv)
     CHECK(to_node == local_node);
     CHECK(from_node > local_node);
 
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
     rsock[from_node-1] = socket; rsrv[from_node-1] = true;
 #else
     new (&remote_qps[from_node-1]) buddy::rdma::QP(remote_cqs, socket, true);
@@ -238,7 +238,7 @@ int main(int argc, char **argv)
     std::cout << "===================" << std::endl;
   }
 
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
   // D2D over doca_rdma. fabric_mem = send half | recv half | ctrl (READY/ACK descriptors).
   // Same product as d2d_depth in the Proxy: without the thread term the staging is short and the
   // recv slots index past it.
@@ -248,7 +248,7 @@ int main(int argc, char **argv)
   size_t fabric_slots = (size_t)config.bufcount_remote * num_remotes * threads;
   size_t fabric_len = 2 * fabric_slots * config.d2d_size + 2 * fabric_slots * 64;
   char *fabric_mem = new char[fabric_len];
-  buddy::rdma::DocaRdma doca_fabric(num_remotes, fabric_mem, fabric_len, lanes);
+  buddy::rdma::Fabric doca_fabric(num_remotes, fabric_mem, fabric_len, lanes);
   for (int i = 0; i < num_remotes; i++) { doca_fabric.connect(i, rsock[i], rsrv[i]); close(rsock[i]); }
   doca_fabric.wait_connected();
   // wait_connected only proves the local ctx is RUNNING. Sending before the peer finishes its own
@@ -269,7 +269,7 @@ int main(int argc, char **argv)
 #ifdef LOCAL_DMA
       &dma_engine,
 #endif
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
       &doca_fabric, fabric_mem,
 #endif
       ranks, routing_table);

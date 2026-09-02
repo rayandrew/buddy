@@ -5,6 +5,9 @@ endif()
 if(DOCA_FABRIC)
 	set(common_src ${common_src} rdma_doca.cpp)
 endif()
+if(DPA_FABRIC)
+	set(common_src ${common_src} rdma_dpa.cpp)
+endif()
 
 add_library(buddy_common INTERFACE)
 target_link_libraries(buddy_common INTERFACE -libverbs)
@@ -19,8 +22,29 @@ endif()
 if(DOCA_FABRIC)
 	target_link_directories(buddy_common INTERFACE /opt/mellanox/doca/lib/${CMAKE_LIBRARY_ARCHITECTURE} /opt/mellanox/doca/lib/aarch64-linux-gnu)
 	target_include_directories(buddy_common INTERFACE /opt/mellanox/doca/include)
-	target_compile_options(buddy_common INTERFACE -DDOCA_ALLOW_EXPERIMENTAL_API -DDOCA_FABRIC)
+	target_compile_options(buddy_common INTERFACE -DDOCA_ALLOW_EXPERIMENTAL_API -DBUDDY_FABRIC)
 	target_link_libraries(buddy_common INTERFACE -ldoca_common -ldoca_rdma)
+endif()
+
+# The DPA kernel is compiled by dpacc into a static archive holding the device image; --app-name
+# must match the buddy_dpa_app symbol rdma_dpa.cpp declares.
+if(DPA_FABRIC)
+	set(DPA_ARCHIVE ${CMAKE_CURRENT_BINARY_DIR}/buddy_dpa_app.a)
+	add_custom_command(OUTPUT ${DPA_ARCHIVE}
+		COMMAND /opt/mellanox/doca/tools/dpacc ${CMAKE_CURRENT_SOURCE_DIR}/rdma_dpa_dev.c
+			-o ${DPA_ARCHIVE} -mcpu=nv-dpa-bf3 -hostcc=gcc
+			-hostcc-options=-DFLEXIO_ALLOW_EXPERIMENTAL_API
+			--devicecc-options=-DFLEXIO_DEV_ALLOW_EXPERIMENTAL_API,-O2,-Wall
+			--app-name=buddy_dpa_app
+			-device-libs=-L/opt/mellanox/doca/lib/aarch64-linux-gnu,-ldoca_dpa_dev,-ldoca_dpa_dev_comm
+			-flto -I/opt/mellanox/doca/include
+		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rdma_dpa_dev.c
+		COMMENT "dpacc buddy_dpa_app")
+	add_custom_target(buddy_dpa_kernel DEPENDS ${DPA_ARCHIVE})
+	target_link_directories(buddy_common INTERFACE /opt/mellanox/doca/lib/${CMAKE_LIBRARY_ARCHITECTURE} /opt/mellanox/doca/lib/aarch64-linux-gnu /opt/mellanox/flexio/lib)
+	target_include_directories(buddy_common INTERFACE /opt/mellanox/doca/include)
+	target_compile_options(buddy_common INTERFACE -DDOCA_ALLOW_EXPERIMENTAL_API -DBUDDY_FABRIC -DFABRIC_DPA)
+	target_link_libraries(buddy_common INTERFACE ${DPA_ARCHIVE} -ldoca_common -ldoca_rdma -ldoca_dpa -lflexio -lmlx5)
 endif()
 
 #if(MPI_FOUND)
@@ -33,6 +57,9 @@ target_link_libraries(buddy PRIVATE buddy_common)
 target_link_libraries(buddy PUBLIC MPI::MPI_C)
 
 add_executable(buddy-proxy ${common_src} proxy_main.cpp proxy.cpp)
+if(DPA_FABRIC)
+	add_dependencies(buddy-proxy buddy_dpa_kernel)
+endif()
 target_link_libraries(buddy-proxy PRIVATE buddy_common)
 target_link_libraries(buddy-proxy PRIVATE MPI::MPI_C)
 if(OpenMP_CXX_FOUND)

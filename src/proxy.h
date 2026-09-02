@@ -10,8 +10,16 @@
 #ifdef LOCAL_DMA
 #include "dma.h"
 #endif
-#ifdef DOCA_FABRIC
+// Three D2D legs. ibverbs defines neither and routes over remote_qps; the two fabric legs share
+// every code path in the proxy and differ only in which class runs the transport.
+#ifdef BUDDY_FABRIC
+#ifdef FABRIC_DPA
+#include "rdma_dpa.h"
+namespace buddy::rdma { using Fabric = DpaFabric; }
+#else
 #include "rdma_doca.h"
+namespace buddy::rdma { using Fabric = DocaRdma; }
+#endif
 #endif
 
 namespace buddy::dpu {
@@ -248,8 +256,8 @@ class Proxy {
 #ifdef LOCAL_DMA
         dma::Engine *dma_engine,
 #endif
-#ifdef DOCA_FABRIC
-        rdma::DocaRdma *doca_fabric, char *fabric_mem,
+#ifdef BUDDY_FABRIC
+        rdma::Fabric *doca_fabric, char *fabric_mem,
 #endif
         int *ranks, route *routing_table);
     ~Proxy();
@@ -272,10 +280,10 @@ class Proxy {
     unsigned dma_wsend, dma_wrecv;
     std::vector<uint32_t> dma_recv_free;
 #endif
-#ifdef DOCA_FABRIC
+#ifdef BUDDY_FABRIC
     // D2D over doca_rdma. Aggregated buffers are staged into fabric_mem (send half | recv half),
     // one send slot / recv slot per (thread, remote, repid), matching the lane that owns them.
-    rdma::DocaRdma *doca_fabric;
+    rdma::Fabric *doca_fabric;
     char *fabric_mem;
     size_t fabric_stage;               // bytes in send/recv half = fabric slots * d2d_size
     size_t fabric_ctrl;                // control region (READY/ACK descriptors) = 2*fabric_stage
