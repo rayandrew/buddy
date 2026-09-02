@@ -138,8 +138,11 @@ static void drain_submits(struct fabric_arg *a)
 		__dpa_thread_window_read_inv();
 		if (d->seq != a->sub_head + 1) break;
 		next = sub + ((a->sub_head + 1) % a->sub_len);
+		/* Defer the flush only when the next op can carry it. post_receive takes no flags, so a
+		 * batch ending in a receive would leave the preceding send queued and never rung: the
+		 * send never completes and the peer never sees it. */
 		post_one(a, d,
-			 (!a->always_flush && next->seq == a->sub_head + 2)
+			 (!a->always_flush && next->seq == a->sub_head + 2 && next->op != OP_RECV)
 				 ? DOCA_DPA_DEV_SUBMIT_FLAG_NONE
 				 : DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
 		a->sub_head++;
@@ -175,22 +178,20 @@ static void drain_completions(struct fabric_arg *a)
 	uint32_t acked = 0;
 	uint32_t recvs = 0;
 
-	while (doca_dpa_dev_get_completion(a->comp, &e)) {
-		/* Leave the completion in the CQ rather than overwrite a slot the Arm has not read.
-		 * The ring holds ring_len entries and a long run wraps it many times over. */
-		if (!consumed)
-			consumed = (volatile uint64_t *)doca_dpa_dev_mmap_get_external_ptr(
-				a->ring_mmap, a->ring_consumed_addr);
-		__dpa_thread_window_read_inv();
-		if (a->tail - *consumed >= a->ring_len) break;
+	/* Read the Arm's index once, before any publish. Invalidating the window inside the loop would
+	 * discard publish()'s pending writes. */
+	consumed = (volatile uint64_t *)doca_dpa_dev_mmap_get_external_ptr(a->ring_mmap,
+									   a->ring_consumed_addr);
+	__dpa_thread_window_read_inv();
+	const uint64_t free_until = *consumed + a->ring_len;
+	ring = (struct ring_slot *)doca_dpa_dev_mmap_get_external_ptr(a->ring_mmap, a->ring_addr);
 
+	/* Space is checked before fetching, never after: doca_dpa_dev_get_completion consumes the
+	 * element, so breaking out once it has been fetched loses that completion outright. */
+	while (a->tail < free_until && doca_dpa_dev_get_completion(a->comp, &e)) {
 		const doca_dpa_dev_completion_type_t t = doca_dpa_dev_get_completion_type(e);
 		const uint32_t imm = doca_dpa_dev_get_completion_immediate(e);
 		const uint32_t c = 0;
-
-		if (!ring)
-			ring = (struct ring_slot *)doca_dpa_dev_mmap_get_external_ptr(
-				a->ring_mmap, a->ring_addr);
 
 		switch (t) {
 		case DOCA_DPA_DEV_COMP_RECV_RDMA_WRITE_IMM:

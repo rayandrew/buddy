@@ -86,6 +86,17 @@ static inline void flush_line(const void *p)
 	asm volatile("dsb sy" ::: "memory");
 }
 
+/* dc civac is clean-and-invalidate, the only cache op available at EL0, so it writes a dirty line
+ * back before invalidating it. memset leaves every ring line dirty, and the first poll of a slot
+ * would then flush those stale zeros over a completion the DPA had already written. Clean the
+ * ranges once up front so no dirty line ever meets a device write. */
+static void flush_range(void *p, size_t len)
+{
+	for (char *q = (char *)p; q < (char *)p + len; q += 64)
+		asm volatile("dc civac, %0" ::"r"(q) : "memory");
+	asm volatile("dsb sy" ::: "memory");
+}
+
 static const char *dpa_ibdev()
 {
 	const char *e = getenv("BUDDY_RDMA_DEV");
@@ -160,6 +171,7 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	ring_mem = (char *)aligned_alloc(kLineSize, ring_bytes);
 	if (!ring_mem) FAIL("dpa ring allocation failed");
 	memset(ring_mem, 0, ring_bytes);
+	flush_range(ring_mem, ring_bytes);
 	ring_consumed = (uint64_t *)ring_mem;
 	ring = (ring_slot *)(ring_mem + kLineSize);
 	CHECK_DOCA(doca_mmap_create(&ring_mmap));
@@ -172,6 +184,7 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	sub_mem = (char *)aligned_alloc(kLineSize, kLineSize + sizeof(submit_slot) * ring_len);
 	if (!sub_mem) FAIL("dpa submit ring allocation failed");
 	memset(sub_mem, 0, kLineSize + sizeof(submit_slot) * ring_len);
+	flush_range(sub_mem, kLineSize + sizeof(submit_slot) * ring_len);
 	sub_consumed = (uint64_t *)sub_mem;
 	sub = (submit_slot *)(sub_mem + kLineSize);
 	CHECK_DOCA(doca_mmap_create(&sub_mmap));
