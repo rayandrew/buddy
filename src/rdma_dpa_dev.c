@@ -59,6 +59,7 @@ struct fabric_arg {
 	uint64_t ring_addr;
 	uint64_t ring_len;
 	uint64_t tail;
+	uint64_t ring_consumed_addr;
 
 	uint64_t local_mmap;
 	uint64_t local_base;
@@ -73,7 +74,15 @@ struct fabric_arg {
 	uint64_t wrid_head[MAX_CONNS];
 	uint64_t wrid_tail[MAX_CONNS];
 
+	/* Receives need their own ids: the proxy indexes its landing slot by the completion's wr_id,
+	 * so publishing 0 makes every message look like it arrived in slot 0. The receive queue is
+	 * FIFO, so the Nth receive completion belongs to the Nth posted receive. */
+	uint64_t rwrid_addr;
+	uint64_t rwrid_head;
+	uint64_t rwrid_tail;
+
 	uint64_t rack;          /* BUDDY_DPA_RACK: call receive_ack per drained receive */
+	uint64_t always_flush;
 	uint64_t errors;
 	uint64_t last_err;
 	uint64_t stop_addr;     /* device word the Arm sets to break the loop at teardown */
@@ -93,6 +102,8 @@ static void post_one(struct fabric_arg *a, struct submit_slot *d, uint32_t flags
 	switch (d->op) {
 	case OP_RECV:
 		doca_dpa_dev_rdma_post_receive(a->rdma, a->local_mmap, laddr, d->len);
+		((uint64_t *)a->rwrid_addr)[a->rwrid_tail % WRID_FIFO] = d->wr_id;
+		a->rwrid_tail++;
 		return;
 	case OP_SEND:
 		doca_dpa_dev_rdma_post_send_imm(a->rdma, c, a->local_mmap, laddr, d->len, d->imm,
@@ -119,15 +130,18 @@ static void drain_submits(struct fabric_arg *a)
 		(uint64_t *)doca_dpa_dev_mmap_get_external_ptr(a->sub_mmap, a->consumed_addr);
 	uint64_t posted = 0;
 
-	__dpa_thread_window_read_inv();
 	for (;;) {
 		struct submit_slot *d = sub + (a->sub_head % a->sub_len);
 		struct submit_slot *next;
+		/* Invalidate per iteration, not once per pass: the Arm writes into this window while the
+		 * loop runs, and a stale read here silently drops the submit rather than deferring it. */
+		__dpa_thread_window_read_inv();
 		if (d->seq != a->sub_head + 1) break;
 		next = sub + ((a->sub_head + 1) % a->sub_len);
 		post_one(a, d,
-			 next->seq == a->sub_head + 2 ? DOCA_DPA_DEV_SUBMIT_FLAG_NONE
-						      : DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
+			 (!a->always_flush && next->seq == a->sub_head + 2)
+				 ? DOCA_DPA_DEV_SUBMIT_FLAG_NONE
+				 : DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
 		a->sub_head++;
 		posted++;
 	}
@@ -156,10 +170,19 @@ static void drain_completions(struct fabric_arg *a)
 {
 	doca_dpa_dev_completion_element_t e;
 	struct ring_slot *ring = NULL;
+	volatile uint64_t *consumed = NULL;
 	uint32_t acked = 0;
 	uint32_t recvs = 0;
 
 	while (doca_dpa_dev_get_completion(a->comp, &e)) {
+		/* Leave the completion in the CQ rather than overwrite a slot the Arm has not read.
+		 * The ring holds ring_len entries and a long run wraps it many times over. */
+		if (!consumed)
+			consumed = (volatile uint64_t *)doca_dpa_dev_mmap_get_external_ptr(
+				a->ring_mmap, a->ring_consumed_addr);
+		__dpa_thread_window_read_inv();
+		if (a->tail - *consumed >= a->ring_len) break;
+
 		const doca_dpa_dev_completion_type_t t = doca_dpa_dev_get_completion_type(e);
 		const uint32_t imm = doca_dpa_dev_get_completion_immediate(e);
 		const uint32_t c = 0;
@@ -171,10 +194,14 @@ static void drain_completions(struct fabric_arg *a)
 		switch (t) {
 		case DOCA_DPA_DEV_COMP_RECV_RDMA_WRITE_IMM:
 		case DOCA_DPA_DEV_COMP_RECV_SEND:
-		case DOCA_DPA_DEV_COMP_RECV_SEND_IMM:
-			publish(ring, a, 0, imm, 0, c, OP_RECV);
+		case DOCA_DPA_DEV_COMP_RECV_SEND_IMM: {
+			uint64_t rid = 0;
+			if (a->rwrid_head != a->rwrid_tail)
+				rid = ((uint64_t *)a->rwrid_addr)[a->rwrid_head++ % WRID_FIFO];
+			publish(ring, a, rid, imm, 0, c, OP_RECV);
 			recvs++;
 			break;
+		}
 		case DOCA_DPA_DEV_COMP_SEND: {
 			uint64_t wr_id = 0;
 			if (a->wrid_head[c] != a->wrid_tail[c])
@@ -188,8 +215,12 @@ static void drain_completions(struct fabric_arg *a)
 			 * error completion carries no error text to the Arm. */
 			a->errors++;
 			a->last_err = t;
-			if (t == DOCA_DPA_DEV_COMP_RECV_ERR) recvs++;
-			else if (a->wrid_head[c] != a->wrid_tail[c]) a->wrid_head[c]++;
+			if (t == DOCA_DPA_DEV_COMP_RECV_ERR) {
+				recvs++;
+				if (a->rwrid_head != a->rwrid_tail) a->rwrid_head++;
+			} else if (a->wrid_head[c] != a->wrid_tail[c]) {
+				a->wrid_head[c]++;
+			}
 			break;
 		}
 		acked++;

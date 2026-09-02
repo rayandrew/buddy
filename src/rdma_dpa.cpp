@@ -42,6 +42,7 @@ struct fabric_arg {
 	uint64_t ring_addr;
 	uint64_t ring_len;
 	uint64_t tail;
+	uint64_t ring_consumed_addr;
 
 	uint64_t local_mmap;
 	uint64_t local_base;
@@ -53,7 +54,12 @@ struct fabric_arg {
 	uint64_t wrid_head[DpaFabric::kMaxConns];
 	uint64_t wrid_tail[DpaFabric::kMaxConns];
 
+	uint64_t rwrid_addr;
+	uint64_t rwrid_head;
+	uint64_t rwrid_tail;
+
 	uint64_t rack;
+	uint64_t always_flush;
 	uint64_t errors;
 	uint64_t last_err;
 	uint64_t stop_addr;
@@ -130,13 +136,18 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	 * mmap and handle from the PF context, not the extended one. */
 	/* 64B-aligned: the DPA reaches these through a window with a 64B alignment restriction, and a
 	 * misaligned range makes the kernel's writes invisible to the Arm with no error anywhere. */
-	ring = (ring_slot *)aligned_alloc(kLineSize, sizeof(ring_slot) * ring_len);
-	if (!ring) FAIL("dpa ring allocation failed");
-	memset(ring, 0, sizeof(ring_slot) * ring_len);
+	/* ring_consumed shares the mapping but its own cache line: without it the kernel would wrap and
+	 * overwrite completions the proxy has not read yet, losing them silently. */
+	const size_t ring_bytes = kLineSize + sizeof(ring_slot) * ring_len;
+	ring_mem = (char *)aligned_alloc(kLineSize, ring_bytes);
+	if (!ring_mem) FAIL("dpa ring allocation failed");
+	memset(ring_mem, 0, ring_bytes);
+	ring_consumed = (uint64_t *)ring_mem;
+	ring = (ring_slot *)(ring_mem + kLineSize);
 	CHECK_DOCA(doca_mmap_create(&ring_mmap));
 	CHECK_DOCA(doca_mmap_add_dev(ring_mmap, pf_dev));
 	CHECK_DOCA(doca_mmap_set_permissions(ring_mmap, perms));
-	CHECK_DOCA(doca_mmap_set_memrange(ring_mmap, ring, sizeof(ring_slot) * ring_len));
+	CHECK_DOCA(doca_mmap_set_memrange(ring_mmap, ring_mem, ring_bytes));
 	CHECK_DOCA(doca_mmap_start(ring_mmap));
 
 	/* sub_consumed shares the mapping but its own cache line. */
@@ -163,6 +174,8 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t), &stop_dev));
 	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t) * kMaxConns * kWridFifo, &wrid_dev));
 	CHECK_DOCA(doca_dpa_memset(dpa, wrid_dev, 0, sizeof(uint64_t) * kMaxConns * kWridFifo));
+	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t) * kWridFifo, &rwrid_dev));
+	CHECK_DOCA(doca_dpa_memset(dpa, rwrid_dev, 0, sizeof(uint64_t) * kWridFifo));
 	{
 		const uint64_t zero = 0;
 		CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, stop_dev, (void *)&zero, sizeof(zero)));
@@ -215,8 +228,10 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 			FAIL("doca " << doca_error_get_descr(bl));
 		CHECK_DOCA(doca_rdma_cap_get_max_message_size(info, &max_msg));
 		if (debug)
-			std::cerr << "[dpa] max_message_size=" << max_msg << " max_sq=" << max_sq
-				  << " max_rq=" << max_rq << std::endl;
+			std::cerr << "[dpa] max_sq=" << max_sq << " max_rq=" << max_rq
+				  << " requested=" << buddy::queue_depth()
+				  << " set_rq=" << doca_error_get_name(rq)
+				  << " set_buf_list=" << doca_error_get_name(bl) << std::endl;
 	}
 	CHECK_DOCA(doca_rdma_dpa_completion_attach(rdma, dpa_comp));
 	CHECK_DOCA(doca_ctx_start(ctx));
@@ -249,9 +264,15 @@ void DpaFabric::start_kernel()
 						(doca_dpa_dev_mmap_t *)&a.ring_mmap));
 	a.ring_addr = (uint64_t)ring;
 	a.ring_len = ring_len;
+	a.ring_consumed_addr = (uint64_t)ring_consumed;
 	a.stop_addr = stop_dev;
 	a.wrid_addr = wrid_dev;
-	a.rack = getenv("BUDDY_DPA_RACK") ? atoi(getenv("BUDDY_DPA_RACK")) : 1;
+	a.rwrid_addr = rwrid_dev;
+	/* Off by default: acking once per receive completion caps progress at the initially posted
+	 * receive count, while never acking runs 30x further. The API reads as incremental but does
+	 * not behave that way here. */
+	a.rack = getenv("BUDDY_DPA_RACK") ? atoi(getenv("BUDDY_DPA_RACK")) : 0;
+	a.always_flush = getenv("BUDDY_DPA_FLUSH_ALL") ? 1 : 0;
 	CHECK_DOCA(doca_mmap_dev_get_dpa_handle(mmap, dev, (doca_dpa_dev_mmap_t *)&a.local_mmap));
 	a.local_base = (uint64_t)mem;
 	a.num_conns = num_connections;
@@ -315,7 +336,7 @@ DpaFabric::~DpaFabric()
 	delete[] conns;
 	doca_mmap_destroy(sub_mmap);
 	delete[] remote_mmap;
-	free(ring);
+	free(ring_mem);
 	free(sub_mem);
 }
 
@@ -446,7 +467,15 @@ bool DpaFabric::poll(unsigned, completion *c)
 		c->op = (op_type)s->op;
 		if (ring_head.compare_exchange_weak(head, head + 1, std::memory_order_acq_rel,
 						    std::memory_order_relaxed)) {
-			completed.fetch_add(1, std::memory_order_relaxed);
+			/* Tell the kernel this slot is free again, or it wraps and overwrites. */
+			__atomic_store_n(ring_consumed, head + 1, __ATOMIC_RELEASE);
+			const uint64_t n = completed.fetch_add(1, std::memory_order_relaxed);
+			if (debug && n < 24) {
+				static const char *kOp[] = {"SEND", "RECV", "READ", "WRITE"};
+				std::cerr << "[dpa] compl#" << n << " " << kOp[c->op & 3]
+					  << " wr=" << c->wr_id << " imm=0x" << std::hex << c->imm
+					  << std::dec << " conn=" << c->conn << std::endl;
+			}
 			return true;
 		}
 	}

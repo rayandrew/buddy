@@ -102,7 +102,9 @@ class DpaFabric {
     doca_mmap *sub_mmap = nullptr;
     std::atomic<uint64_t> sub_tail{0};
 
+    char *ring_mem = nullptr;
     ring_slot *ring = nullptr;
+    uint64_t *ring_consumed = nullptr;
     doca_mmap *ring_mmap = nullptr;
     unsigned ring_len;
     std::atomic<uint64_t> ring_head{0};
@@ -110,6 +112,7 @@ class DpaFabric {
     uint64_t arg_dev = 0;
     uint64_t stop_dev = 0;
     uint64_t wrid_dev = 0;
+    uint64_t rwrid_dev = 0;
     std::atomic<uint64_t> posted{0};
     std::atomic<uint64_t> completed{0};
 };

@@ -313,6 +313,10 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
   rdma::Fabric::completion c;
   while (doca_fabric->poll(lane_of_thread(tid), &c)) {
     did_work = true;
+    // BUDDY_FABRIC_TRACE: same line on either leg, so the working one is a reference for the other.
+    if (getenv("BUDDY_FABRIC_TRACE"))
+      std::clog << "[fab] op=" << (int)c.op << " wr=" << c.wr_id << " imm=0x" << std::hex << c.imm
+                << std::dec << " conn=" << c.conn << std::endl;
     if (c.op == rdma::Fabric::OP_SEND) {
       if (c.wr_id == FABRIC_CTRL) continue;        // READY/ACK control send
       auto id = send_buf_id::from_int(c.wr_id);    // push (send-mode) data flushed
