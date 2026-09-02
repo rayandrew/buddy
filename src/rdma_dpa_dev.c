@@ -16,6 +16,8 @@
 
 #define MAX_CONNS 8
 #define WRID_FIFO 1024
+/* Longest run of operations posted without ringing the doorbell. */
+#define FLUSH_EVERY 8
 
 enum { OP_SEND, OP_RECV, OP_READ, OP_WRITE };
 
@@ -129,6 +131,7 @@ static void drain_submits(struct fabric_arg *a)
 	uint64_t *consumed =
 		(uint64_t *)doca_dpa_dev_mmap_get_external_ptr(a->sub_mmap, a->consumed_addr);
 	uint64_t posted = 0;
+	uint32_t unflushed = 0;
 
 	for (;;) {
 		struct submit_slot *d = sub + (a->sub_head % a->sub_len);
@@ -138,13 +141,17 @@ static void drain_submits(struct fabric_arg *a)
 		__dpa_thread_window_read_inv();
 		if (d->seq != a->sub_head + 1) break;
 		next = sub + ((a->sub_head + 1) % a->sub_len);
-		/* Defer the flush only when the next op can carry it. post_receive takes no flags, so a
-		 * batch ending in a receive would leave the preceding send queued and never rung: the
-		 * send never completes and the peer never sees it. */
+		/* Defer the flush only when the next op can carry it, and only for a bounded run.
+		 * post_receive takes no flags, so a batch ending in a receive would leave the preceding
+		 * send queued and never rung. Aggregating without limit loses ops outright: buddy submits
+		 * bufcount_remote sends at once and only a handful arrived. */
+		unflushed++;
 		post_one(a, d,
-			 (!a->always_flush && next->seq == a->sub_head + 2 && next->op != OP_RECV)
+			 (!a->always_flush && unflushed < FLUSH_EVERY &&
+			  next->seq == a->sub_head + 2 && next->op != OP_RECV)
 				 ? DOCA_DPA_DEV_SUBMIT_FLAG_NONE
 				 : DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
+		if (unflushed >= FLUSH_EVERY) unflushed = 0;
 		a->sub_head++;
 		posted++;
 	}
