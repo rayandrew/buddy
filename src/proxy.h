@@ -282,9 +282,11 @@ class Proxy {
     bool fabric_poll(std::list<blocked_req>& blocked_reqs);   // true if it processed anything
     void fabric_ack(unsigned peer, uint32_t slot, uint64_t id);
     void fabric_credit(unsigned peer, uint32_t slot);
-    // Inverse of the flush_remote slot encoding: which lane owns this fabric slot.
+    // Which engine serves a fabric slot. Slots are per thread (the flush_remote encoding), lanes
+    // are per engine and there may be fewer, so threads share an engine round-robin.
     unsigned fabric_lane(uint32_t slot) const
-    { return slot / (num_remotes * config.bufcount_remote); }
+    { return lane_of_thread(slot / (num_remotes * config.bufcount_remote)); }
+    unsigned lane_of_thread(unsigned tid) const;
 #endif
 
     const int num_threads;

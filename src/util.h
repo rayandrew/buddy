@@ -28,6 +28,19 @@ inline double clock()
 //
 // It bounds bufcount_remote, which is a *count of posted receives*: d2d_depth is
 // bufcount_remote * peers * threads, and exceeding this makes ibv_post_srq_recv return ENOMEM.
+// Progress engines the DOCA fabric runs, independent of the routing thread count. DOCA has no
+// shared completion queue, so every lane a thread owns is another engine to poll: at low traffic
+// the empty polls cost more than the parallelism buys. 1 keeps routing multi-threaded on one engine.
+inline unsigned fabric_lanes()
+{
+  static const unsigned n = [] {
+    const char *e = getenv("BUDDY_FABRIC_LANES");
+    const int v = (e && *e) ? atoi(e) : 0;
+    return v > 0 ? (unsigned)v : 1u;
+  }();
+  return n;
+}
+
 inline unsigned queue_depth()
 {
   static const unsigned n = [] {

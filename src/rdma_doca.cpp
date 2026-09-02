@@ -32,22 +32,30 @@ static double now_seconds()
 // deadline turns a genuinely wedged queue into a diagnosable error instead of a hang.
 static const double kDrainTimeout = 60.0;
 
-static bool drain_and_retry(struct doca_pe *pe, doca_error_t err, double *deadline)
+static bool drain_and_retry(DocaRdma::Lane &l, doca_error_t err, double *deadline)
 {
   if (err != DOCA_ERROR_FULL && err != DOCA_ERROR_NO_MEMORY && err != DOCA_ERROR_AGAIN) return false;
   const double now = now_seconds();
   if (*deadline == 0.0) *deadline = now + kDrainTimeout;
   else if (now > *deadline) return false;
-  doca_pe_progress(pe);
+  // Retaken rather than held from the attempt: the engine is thread-unsafe, so progressing it
+  // outside the lock would race a concurrent poll on the same lane.
+  std::lock_guard<std::mutex> lk(l.lock);
+  doca_pe_progress(l.pe);
   return true;
 }
 
 // Submit-side counterpart to CHECK_DOCA: retries the transient statuses above instead of aborting.
-#define DOCA_SUBMIT(pe, a) do {                                                       \
+// The lock spans one attempt, never the retry loop, which is what let a full queue wedge the whole
+// fabric before: the poll that would have emptied it could not run.
+#define DOCA_SUBMIT(l, a) do {                                                        \
     doca_error_t _err; double _dl = 0.0;                                              \
-    while ((_err = (a)) != DOCA_SUCCESS)                                              \
-      if (!drain_and_retry(pe, _err, &_dl))                                           \
+    for (;;) {                                                                        \
+      { std::lock_guard<std::mutex> _lk((l).lock); _err = (a); }                      \
+      if (_err == DOCA_SUCCESS) break;                                                \
+      if (!drain_and_retry((l), _err, &_dl))                                          \
         FAIL("doca " << doca_error_get_descr(_err));                                  \
+    }                                                                                 \
   } while (0)
 
 static const char *rdma_ibdev() { const char *e = getenv("BUDDY_RDMA_DEV"); return e && *e ? e : "mlx5_2"; }
@@ -332,66 +340,67 @@ void DocaRdma::send_imm(unsigned lane, unsigned conn_idx, uint32_t imm, size_t o
 {
   Lane &l = lane_of(lane);
   struct doca_buf *src;
-  DOCA_SUBMIT(l.pe, doca_buf_inventory_buf_get_by_data(l.inv, mmap, mem + offset, len, &src));
+  DOCA_SUBMIT(l, doca_buf_inventory_buf_get_by_data(l.inv, mmap, mem + offset, len, &src));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_send_imm *task;
-  DOCA_SUBMIT(l.pe, doca_rdma_task_send_imm_allocate_init(l.rdma, l.conns[conn_idx], src, htobe32(imm), tu, &task));
-  DOCA_SUBMIT(l.pe, doca_task_submit(doca_rdma_task_send_imm_as_task(task)));
+  DOCA_SUBMIT(l, doca_rdma_task_send_imm_allocate_init(l.rdma, l.conns[conn_idx], src, htobe32(imm), tu, &task));
+  DOCA_SUBMIT(l, doca_task_submit(doca_rdma_task_send_imm_as_task(task)));
 }
 
 void DocaRdma::post_recv(unsigned lane, size_t offset, size_t len, uint64_t wr_id)
 {
   Lane &l = lane_of(lane);
   struct doca_buf *dst;
-  DOCA_SUBMIT(l.pe, doca_buf_inventory_buf_get_by_addr(l.inv, mmap, mem + offset, len, &dst));
+  DOCA_SUBMIT(l, doca_buf_inventory_buf_get_by_addr(l.inv, mmap, mem + offset, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_receive *task;
-  DOCA_SUBMIT(l.pe, doca_rdma_task_receive_allocate_init(l.rdma, dst, tu, &task));
-  DOCA_SUBMIT(l.pe, doca_task_submit(doca_rdma_task_receive_as_task(task)));
+  DOCA_SUBMIT(l, doca_rdma_task_receive_allocate_init(l.rdma, dst, tu, &task));
+  DOCA_SUBMIT(l, doca_task_submit(doca_rdma_task_receive_as_task(task)));
 }
 
 void DocaRdma::read(unsigned lane, unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id)
 {
   Lane &l = lane_of(lane);
   struct doca_buf *src, *dst;                 // src = peer memory, dst = our memory
-  DOCA_SUBMIT(l.pe, doca_buf_inventory_buf_get_by_addr(l.inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &src));
-  DOCA_SUBMIT(l.pe, doca_buf_set_data(src, remote_base[conn_idx]+remote_off, len));
-  DOCA_SUBMIT(l.pe, doca_buf_inventory_buf_get_by_addr(l.inv, mmap, mem+local_off, len, &dst));
+  DOCA_SUBMIT(l, doca_buf_inventory_buf_get_by_addr(l.inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &src));
+  DOCA_SUBMIT(l, doca_buf_set_data(src, remote_base[conn_idx]+remote_off, len));
+  DOCA_SUBMIT(l, doca_buf_inventory_buf_get_by_addr(l.inv, mmap, mem+local_off, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_read *task;
-  DOCA_SUBMIT(l.pe, doca_rdma_task_read_allocate_init(l.rdma, l.conns[conn_idx], src, dst, tu, &task));
-  DOCA_SUBMIT(l.pe, doca_task_submit(doca_rdma_task_read_as_task(task)));
+  DOCA_SUBMIT(l, doca_rdma_task_read_allocate_init(l.rdma, l.conns[conn_idx], src, dst, tu, &task));
+  DOCA_SUBMIT(l, doca_task_submit(doca_rdma_task_read_as_task(task)));
 }
 
 void DocaRdma::write(unsigned lane, unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id)
 {
   Lane &l = lane_of(lane);
   struct doca_buf *src, *dst;                 // src = our memory, dst = peer memory
-  DOCA_SUBMIT(l.pe, doca_buf_inventory_buf_get_by_addr(l.inv, mmap, mem+local_off, len, &src));
-  DOCA_SUBMIT(l.pe, doca_buf_set_data(src, mem+local_off, len));
-  DOCA_SUBMIT(l.pe, doca_buf_inventory_buf_get_by_addr(l.inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
+  DOCA_SUBMIT(l, doca_buf_inventory_buf_get_by_addr(l.inv, mmap, mem+local_off, len, &src));
+  DOCA_SUBMIT(l, doca_buf_set_data(src, mem+local_off, len));
+  DOCA_SUBMIT(l, doca_buf_inventory_buf_get_by_addr(l.inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_write *task;
-  DOCA_SUBMIT(l.pe, doca_rdma_task_write_allocate_init(l.rdma, l.conns[conn_idx], src, dst, tu, &task));
-  DOCA_SUBMIT(l.pe, doca_task_submit(doca_rdma_task_write_as_task(task)));
+  DOCA_SUBMIT(l, doca_rdma_task_write_allocate_init(l.rdma, l.conns[conn_idx], src, dst, tu, &task));
+  DOCA_SUBMIT(l, doca_task_submit(doca_rdma_task_write_as_task(task)));
 }
 
 void DocaRdma::write_imm(unsigned lane, unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint32_t imm, uint64_t wr_id)
 {
   Lane &l = lane_of(lane);
   struct doca_buf *src, *dst;
-  DOCA_SUBMIT(l.pe, doca_buf_inventory_buf_get_by_addr(l.inv, mmap, mem+local_off, len, &src));
-  DOCA_SUBMIT(l.pe, doca_buf_set_data(src, mem+local_off, len));
-  DOCA_SUBMIT(l.pe, doca_buf_inventory_buf_get_by_addr(l.inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
+  DOCA_SUBMIT(l, doca_buf_inventory_buf_get_by_addr(l.inv, mmap, mem+local_off, len, &src));
+  DOCA_SUBMIT(l, doca_buf_set_data(src, mem+local_off, len));
+  DOCA_SUBMIT(l, doca_buf_inventory_buf_get_by_addr(l.inv, remote_mmap[conn_idx], remote_base[conn_idx]+remote_off, len, &dst));
   union doca_data tu; tu.u64 = wr_id;
   struct doca_rdma_task_write_imm *task;
-  DOCA_SUBMIT(l.pe, doca_rdma_task_write_imm_allocate_init(l.rdma, l.conns[conn_idx], src, dst, htobe32(imm), tu, &task));
-  DOCA_SUBMIT(l.pe, doca_task_submit(doca_rdma_task_write_imm_as_task(task)));
+  DOCA_SUBMIT(l, doca_rdma_task_write_imm_allocate_init(l.rdma, l.conns[conn_idx], src, dst, htobe32(imm), tu, &task));
+  DOCA_SUBMIT(l, doca_task_submit(doca_rdma_task_write_imm_as_task(task)));
 }
 
 bool DocaRdma::poll(unsigned lane, completion *c)
 {
   Lane &l = lane_of(lane);
+  std::lock_guard<std::mutex> lk(l.lock);
   // Only touch the hardware when the software queue is dry. A drain loop calls this once per
   // completion, and progressing on each of those repolls the CQ for completions already in hand.
   if (l.completed.empty()) doca_pe_progress(l.pe);
@@ -403,6 +412,7 @@ bool DocaRdma::poll(unsigned lane, completion *c)
 bool DocaRdma::wait_idle(unsigned lane, double timeout_s)
 {
   Lane &l = lane_of(lane);
+  std::lock_guard<std::mutex> lk(l.lock);
   if (!l.completed.empty()) return true;
   doca_notification_handle_t handle;
   if (doca_pe_get_notification_handle(l.pe, &handle) != DOCA_SUCCESS) return false;

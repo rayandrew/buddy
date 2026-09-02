@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <mutex>
 #include <queue>
 
 struct doca_dev;
@@ -30,6 +31,9 @@ class DocaRdma {
       std::queue<completion> completed;
       unsigned established = 0;
       bool failed = false;
+      // Held for one submit or one progress call and never across a retry, which is what libmlx5
+      // does for the ibverbs leg's shared CQ. Only contended when lanes < routing threads.
+      std::mutex lock;
     };
 
     // mem = a single region covering both send and recv buffers (registered once).

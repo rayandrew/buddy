@@ -282,12 +282,18 @@ void Proxy::dma_xfer(unsigned client, uint32_t offset, uint32_t len, dma::direct
 #endif
 
 #ifdef DOCA_FABRIC
+unsigned Proxy::lane_of_thread(unsigned tid) const
+{
+  const unsigned n = doca_fabric->lanes_count();
+  return n ? tid % n : 0;
+}
+
 // send an ACK (echoing the sender's send_buf_id) so it frees its buffer -- via doca_rdma.
 void Proxy::fabric_ack(unsigned peer, uint32_t slot, uint64_t id)
 {
   uint64_t *a = (uint64_t *)(fabric_mem + fabric_ctrl + (size_t)(d2d_depth + slot)*64);
   *a = id;
-  doca_fabric->send_imm(omp_get_thread_num(), peer, IMM_D2D_ACK,
+  doca_fabric->send_imm(lane_of_thread(omp_get_thread_num()), peer, IMM_D2D_ACK,
       fabric_ctrl + (size_t)(d2d_depth+slot)*64, sizeof(uint64_t), FABRIC_CTRL);
 }
 
@@ -295,7 +301,7 @@ void Proxy::fabric_ack(unsigned peer, uint32_t slot, uint64_t id)
 // recv half doubles as the write-landing region, so a payload buffer there would be corrupted).
 void Proxy::fabric_credit(unsigned peer, uint32_t slot)
 {
-  doca_fabric->send_imm(omp_get_thread_num(), peer, (slot << IMM_SLOT_SHIFT) | IMM_D2D_CREDIT,
+  doca_fabric->send_imm(lane_of_thread(omp_get_thread_num()), peer, (slot << IMM_SLOT_SHIFT) | IMM_D2D_CREDIT,
       fabric_ctrl + (size_t)(d2d_depth + slot)*64, sizeof(uint32_t), FABRIC_CTRL);
 }
 
@@ -305,7 +311,7 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
   int tid = omp_get_thread_num();
   bool did_work = false;
   rdma::DocaRdma::completion c;
-  while (doca_fabric->poll(tid, &c)) {
+  while (doca_fabric->poll(lane_of_thread(tid), &c)) {
     did_work = true;
     if (c.op == rdma::DocaRdma::OP_SEND) {
       if (c.wr_id == FABRIC_CTRL) continue;        // READY/ACK control send
@@ -337,7 +343,7 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
       d2d_desc desc;
       memcpy(&desc, slotbuf, sizeof(desc));
       pending_reads[c.wr_id] = { c.conn, desc.id, desc.len };
-      doca_fabric->read(tid, c.conn, fabric_stage + (size_t)c.wr_id*config.d2d_size, desc.addr, desc.len, c.wr_id);
+      doca_fabric->read(lane_of_thread(tid), c.conn, fabric_stage + (size_t)c.wr_id*config.d2d_size, desc.addr, desc.len, c.wr_id);
     } else if (tag == IMM_D2D_ACK) {               // pull: our sent buffer was read -> free it
       uint64_t fid; memcpy(&fid, slotbuf, sizeof(fid));
       auto id = send_buf_id::from_int(fid);
@@ -724,7 +730,7 @@ void Proxy::rdma_loop()
       // Nothing anywhere: park on the engine instead of spinning. The timeout bounds how long the
       // local queues wait, and 0 (the default) keeps the original busy-poll.
       if (config.doca_event_us > 0 && !recv && !fabric_work && blocklist.empty())
-        doca_fabric->wait_idle(tid, config.doca_event_us * 1e-6);
+        doca_fabric->wait_idle(lane_of_thread(tid), config.doca_event_us * 1e-6);
 #endif
     }
 
@@ -1033,13 +1039,13 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
     // pull: peer reads our send slot; buffer stays FLUSHING until it ACKs.
     d2d_desc *desc = (d2d_desc *)(fabric_mem + fabric_ctrl + (size_t)s*64);
     *desc = { .addr = send_off, .id = id.as_int(), .rkey = 0, .len = (uint32_t)size };
-    doca_fabric->send_imm(tid, idx, IMM_D2D_READY, fabric_ctrl + (size_t)s*64, sizeof(d2d_desc), FABRIC_CTRL);
+    doca_fabric->send_imm(lane_of_thread(tid), idx, IMM_D2D_READY, fabric_ctrl + (size_t)s*64, sizeof(d2d_desc), FABRIC_CTRL);
   } else if (config.d2d_mode == D2D_WRITE) {
     // push one-sided: write into the peer's recv slot s + imm(slot); freed on CREDIT.
-    doca_fabric->write_imm(tid, idx, send_off, fabric_stage + (size_t)s*config.d2d_size, size,
+    doca_fabric->write_imm(lane_of_thread(tid), idx, send_off, fabric_stage + (size_t)s*config.d2d_size, size,
         (s << IMM_SLOT_SHIFT) | IMM_D2D_WRITE, FABRIC_CTRL);
   } else {
-    doca_fabric->send_imm(tid, idx, IMM_D2D_RDMA, send_off, size, id.as_int());   // push (send)
+    doca_fabric->send_imm(lane_of_thread(tid), idx, IMM_D2D_RDMA, send_off, size, id.as_int());   // push (send)
   }
 #else
   if (config.d2d_mode == D2D_READ) {
