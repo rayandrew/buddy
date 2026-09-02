@@ -68,6 +68,24 @@ struct fabric_arg {
 	uint64_t wakes;
 };
 
+/* The DPA reaches Arm memory through a window it must explicitly write back, so those writes are not
+ * plainly coherent with the Arm's caches. A spin on an ordinary load can therefore sit on a stale
+ * line forever, which is why progress looked random. Invalidate the line before every such read. */
+static inline void inv_line(const void *p)
+{
+	asm volatile("dc civac, %0" ::"r"(p) : "memory");
+	asm volatile("dsb sy" ::: "memory");
+}
+
+/* The mirror: the DPA reads Arm memory, not the Arm's caches, so a slot written here is invisible
+ * until its line is cleaned out. A slot is one 64B line, so payload and seq leave together and the
+ * DPA never sees a half-written descriptor. */
+static inline void flush_line(const void *p)
+{
+	asm volatile("dc cvac, %0" ::"r"(p) : "memory");
+	asm volatile("dsb sy" ::: "memory");
+}
+
 static const char *dpa_ibdev()
 {
 	const char *e = getenv("BUDDY_RDMA_DEV");
@@ -394,7 +412,7 @@ uint64_t DpaFabric::submit(uint32_t op, unsigned conn_idx, size_t local_off, siz
 			   size_t len, uint32_t imm, uint64_t wr_id)
 {
 	const uint64_t mine = sub_tail.fetch_add(1, std::memory_order_relaxed);
-	while (mine - __atomic_load_n(sub_consumed, __ATOMIC_ACQUIRE) >= ring_len)
+	while (inv_line(sub_consumed), mine - __atomic_load_n(sub_consumed, __ATOMIC_ACQUIRE) >= ring_len)
 		asm volatile("yield" ::: "memory");
 
 	submit_slot *d = &sub[mine % ring_len];
@@ -406,6 +424,7 @@ uint64_t DpaFabric::submit(uint32_t op, unsigned conn_idx, size_t local_off, siz
 	d->conn = conn_idx;
 	d->op = op;
 	__atomic_store_n(&d->seq, mine + 1, __ATOMIC_RELEASE);
+	flush_line(d);
 	posted.fetch_add(1, std::memory_order_relaxed);
 
 	if (debug && mine < 16) {
@@ -430,7 +449,7 @@ void DpaFabric::send_imm(unsigned, unsigned conn_idx, uint32_t imm, size_t offse
 void DpaFabric::post_recv(unsigned, size_t offset, size_t len, uint64_t wr_id)
 {
 	const uint64_t seq = submit(OP_RECV, 0, offset, 0, len, 0, wr_id);
-	while (__atomic_load_n(sub_consumed, __ATOMIC_ACQUIRE) < seq)
+	while (inv_line(sub_consumed), __atomic_load_n(sub_consumed, __ATOMIC_ACQUIRE) < seq)
 		asm volatile("yield" ::: "memory");
 }
 
@@ -459,6 +478,7 @@ bool DpaFabric::poll(unsigned, completion *c)
 	for (;;) {
 		uint64_t head = ring_head.load(std::memory_order_relaxed);
 		ring_slot *s = &ring[head % ring_len];
+		inv_line(s);
 		if (__atomic_load_n(&s->seq, __ATOMIC_ACQUIRE) != head + 1) return false;
 		c->wr_id = s->wr_id;
 		c->imm = be32toh(s->imm);
@@ -469,6 +489,7 @@ bool DpaFabric::poll(unsigned, completion *c)
 						    std::memory_order_relaxed)) {
 			/* Tell the kernel this slot is free again, or it wraps and overwrites. */
 			__atomic_store_n(ring_consumed, head + 1, __ATOMIC_RELEASE);
+			flush_line(ring_consumed);
 			const uint64_t n = completed.fetch_add(1, std::memory_order_relaxed);
 			if (debug && n < 24) {
 				static const char *kOp[] = {"SEND", "RECV", "READ", "WRITE"};

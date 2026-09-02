@@ -161,7 +161,8 @@ static void publish(struct ring_slot *ring, struct fabric_arg *a, uint64_t wr_id
 	s->len = len;
 	s->conn = conn;
 	s->op = op;
-	__dpa_thread_window_writeback();
+	/* One writeback: a slot is a single 64B line, so payload and seq leave together and the Arm
+	 * cannot observe a new seq against a stale payload. */
 	s->seq = ++a->tail;
 	__dpa_thread_window_writeback();
 }
