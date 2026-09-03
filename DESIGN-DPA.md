@@ -110,24 +110,24 @@ Each of these was found by measurement, and each fails silently with no error an
 
 ### The routing engine, measured
 
-`src/dpa_d2d.cpp` and `src/dpa_d2d_dev.c`, one peer, 4 KB buffers, 32 records each:
+`src/dpa_d2d.cpp` and `src/dpa_d2d_dev.c`, one peer, 4 KB buffers, 32 records each. These numbers
+are from healthy hardware: an earlier set was taken while one DPU's NIC was failing with transmit
+timeouts, and it understated the engine by about 2x at four engines.
 
-| engines | window | msg/s | records/s | errors |
-|---|---|---|---|---|
-| 1 | 16 (256 buffers) | 183k | 5.88M | 0 |
-| 1 | 16 (128 buffers) | 90k | 2.89M | 0 |
-| 2 | 16 (128 buffers) | 90k | 2.89M | 1 |
-| 4 | 16 (128 buffers) | 183k | 5.86M | 2 |
-| 8 | 16 (128 buffers) | 483k | 15.5M | 7 |
-| 12 | 16 (128 buffers) | **1.32M** | **42.3M** | 0 |
-| 16 | 16 (128 buffers) | 1.26M | 40.4M | 1 |
+| engines | msg/s | records/s | errors |
+|---|---|---|---|
+| 1 | 93.5k | 2.99M | 0 |
+| 4 | 365k | 11.7M | 0 |
+| 8 | 571k | 18.3M | 1 |
+| 12 | **1.35M** | **43.1M** | 0 |
+| 16 | 1.28M | 41.0M | 0 |
 
-**Engines are the scaling axis, not depth.** Twelve engines route 1.32M messages and 42.3M records
-per second, about 5.4 GB/s of 4 KB buffers, against ~150k for the DOCA CPU path at buddy's two
-threads. Sixteen engines is no better than twelve, so the knee is around twelve.
+Against ~150k for the DOCA CPU path at buddy's two threads, doing strictly less work: the engine
+routes every record. Engines are the scaling axis, not queue depth, and the knee is around twelve.
 
-Depth is capped by work per wake and does not need raising: a window of 16 per engine is enough
-once there are enough engines.
+**One error still occurs and is unexplained.** About one in two million messages, on healthy
+hardware, with the receive-index fix in place. It is not harmless: the engine that takes it stops,
+which is why eight engines came in below the trend.
 
 ### Two limits found, and what they mean
 
