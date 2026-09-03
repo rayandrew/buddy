@@ -132,6 +132,7 @@ static void drain_submits(struct fabric_arg *a)
 		(uint64_t *)doca_dpa_dev_mmap_get_external_ptr(a->sub_mmap, a->consumed_addr);
 	uint64_t posted = 0;
 	uint32_t unflushed = 0;
+	uint32_t recvs_posted = 0;
 
 	for (;;) {
 		struct submit_slot *d = sub + (a->sub_head % a->sub_len);
@@ -152,9 +153,15 @@ static void drain_submits(struct fabric_arg *a)
 				 ? DOCA_DPA_DEV_SUBMIT_FLAG_NONE
 				 : DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
 		if (unflushed >= FLUSH_EVERY) unflushed = 0;
+		if (d->op == OP_RECV) recvs_posted++;
 		a->sub_head++;
 		posted++;
 	}
+	/* Measured: receives posted here only become effective once something rings the queue, and
+	 * post_receive takes no submit flags. A side that only receives issues no flushed operation at
+	 * all, so its re-posts never arm and it stops after its initial batch. receive_ack is not the
+	 * ring (it makes it strictly worse), so push the descriptors out explicitly. */
+	if (recvs_posted) __dpa_thread_memory_writeback();
 	if (posted) {
 		*consumed = a->sub_head;
 		__dpa_thread_window_writeback();
