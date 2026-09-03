@@ -92,10 +92,10 @@ int main(int argc, char **argv)
 	for (int i = 0; i < seconds; i++) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		const auto s = d2d.sample();
-		printf("dpa-d2d %s t=%2ds  rx %8lu/s  tx %8lu/s  %10lu rec/s  wakes=%-10lu fwd=%-9lu local=%-9lu bad=%lu errors=%lu last=0x%lx\n",
+		printf("dpa-d2d %s t=%2ds  rx %8lu/s  tx %8lu/s  %10lu rec/s  wakes=%-10lu fwd=%-9lu local=%-9lu bad=%lu errors=%lu last=0x%lx first_err@rx=%lu\n",
 		       server ? "server" : "client", i + 1, s.rx_msgs - prev.rx_msgs,
 		       s.tx_msgs - prev.tx_msgs, s.records - prev.records, s.wakes, s.forwards,
-		       s.local, s.bad_records, s.errors, s.last_err);
+		       s.local, s.bad_records, s.errors, s.last_err, s.first_err_rx);
 		fflush(stdout);
 		prev = s;
 	}

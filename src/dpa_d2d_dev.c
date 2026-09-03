@@ -70,6 +70,8 @@ struct d2d_engine {
 	uint64_t bad_records;
 	uint64_t errors;
 	uint64_t last_err;
+	uint64_t first_err_rx;  /* rx_msgs when the first error hit */
+	uint64_t first_err_tx;
 };
 
 #define D2D_LOCAL 0xFF
@@ -219,6 +221,13 @@ __dpa_global__ void d2d_handler(uint64_t arg)
 				break;
 			}
 			default:
+				/* Record when the first error hit, not just that it did: errors track the
+				 * engine count at about one each, so whether they land during the first
+				 * few messages or under load decides if this is a start-up race. */
+				if (!e->errors) {
+					e->first_err_rx = e->rx_msgs;
+					e->first_err_tx = e->tx_msgs;
+				}
 				e->errors++;
 				e->last_err = t;
 				break;

@@ -23,6 +23,7 @@ class DpaD2D {
   public:
     struct stats {
         uint64_t wakes, tx_msgs, rx_msgs, records, forwards, local, bad_records, errors, last_err;
+        uint64_t first_err_rx, first_err_tx;
     };
 
     static constexpr unsigned kMaxEngines = 16;

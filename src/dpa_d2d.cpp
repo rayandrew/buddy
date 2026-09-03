@@ -56,6 +56,8 @@ struct d2d_engine_arg {
 	uint64_t bad_records;
 	uint64_t errors;
 	uint64_t last_err;
+	uint64_t first_err_rx;
+	uint64_t first_err_tx;
 };
 
 struct DpaD2D::Engine {
@@ -295,7 +297,11 @@ DpaD2D::stats DpaD2D::sample() const
 		s.local += a.local;
 		s.bad_records += a.bad_records;
 		s.errors += a.errors;
-		if (a.last_err) s.last_err = a.last_err;
+		if (a.last_err) {
+			s.last_err = a.last_err;
+			s.first_err_rx = a.first_err_rx;
+			s.first_err_tx = a.first_err_tx;
+		}
 	}
 	return s;
 }

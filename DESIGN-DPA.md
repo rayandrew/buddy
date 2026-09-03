@@ -118,10 +118,20 @@ Each of these was found by measurement, and each fails silently with no error an
 | 1 | 16 (128 buffers) | 90k | 2.89M | 0 |
 | 2 | 16 (128 buffers) | 90k | 2.89M | 1 |
 | 4 | 16 (128 buffers) | 183k | 5.86M | 2 |
-| 8 | 16 (128 buffers) | 386k | 12.36M | 4 |
+| 8 | 16 (128 buffers) | 483k | 15.5M | 7 |
+| 12 | 16 (128 buffers) | **1.32M** | **42.3M** | 0 |
+| 16 | 16 (128 buffers) | 1.26M | 40.4M | 1 |
 
-Engines are the scaling axis, not depth: 2 to 4 to 8 doubles each time. Errors track the engine
-count at about one each, which looks like a race at start rather than a fault under load.
+**Engines are the scaling axis, not depth.** Twelve engines route 1.32M messages and 42.3M records
+per second, about 5.4 GB/s of 4 KB buffers, against ~150k for the DOCA CPU path at buddy's two
+threads. Sixteen engines is no better than twelve, so the knee is around twelve.
+
+Depth is capped by work per wake and does not need raising: a window of 16 per engine is enough
+once there are enough engines.
+
+The occasional `RECV_ERR` is not proportional to engine count - seven at eight engines, none at
+twelve, one at sixteen - so it is timing dependent rather than a per-engine start-up race. It does
+not stop traffic: the runs above sustain full rate through it.
 
 Against ~150k for the DOCA CPU path at buddy's two threads, and 180k for the first DPA fabric which
 also stalled and returned wrong answers. The engine does strictly more work than either, since it
