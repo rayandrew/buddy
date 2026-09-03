@@ -24,6 +24,31 @@ namespace buddy::rdma { using Fabric = DocaRdma; }
 
 namespace buddy::dpu {
 
+// The DPA completion API reports no received length (its accessors are type, immediate, user data
+// and work-request index), so on that leg the sender packs the length into the immediate's spare
+// high bits. Send mode uses only the low tag byte, and d2d_size fits well inside the rest. The
+// other legs take the length from the completion and are unaffected.
+inline uint32_t fabric_send_imm(uint32_t tag, uint32_t len)
+{
+#ifdef FABRIC_DPA
+    return (len << 8) | tag;
+#else
+    (void)len;
+    return tag;
+#endif
+}
+
+inline uint32_t fabric_recv_len(uint32_t imm, uint32_t completion_len)
+{
+#ifdef FABRIC_DPA
+    (void)completion_len;
+    return imm >> 8;
+#else
+    (void)imm;
+    return completion_len;
+#endif
+}
+
 // D2D transport mode (DPU<->DPU leg). See BUDDY_D2D_MODE.
 enum d2d_mode { D2D_SEND = 0, D2D_READ = 1, D2D_WRITE = 2 };
 

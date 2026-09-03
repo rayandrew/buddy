@@ -372,10 +372,11 @@ bool Proxy::fabric_poll(std::list<blocked_req>& blocklist)
           .mark_complete((slot / per_peer) % num_remotes, slot % per_peer);
       post_recv(route::make_remote(c.wr_id));
     } else {                                       // push (send-mode) data in recv slot
+      const uint32_t rlen = fabric_recv_len(c.imm, c.len);
       in_counters[tid].count_remote++;
-      in_counters[tid].bytes_remote += c.len;
+      in_counters[tid].bytes_remote += rlen;
       route recv_rt = route::make_remote(c.wr_id);
-      ReqBufRead reader(slotbuf, c.len);
+      ReqBufRead reader(slotbuf, rlen);
       if (route_reqs(reader, blocklist)) post_recv(recv_rt);
       else { blocked_req br = {recv_rt, reader, omp_get_wtime()+config.timeout}; blocklist.push_back(br); }
     }
@@ -1049,7 +1050,9 @@ bool Proxy::flush_remote(unsigned idx, unsigned repid)
     doca_fabric->write_imm(lane_of_thread(tid), idx, send_off, fabric_stage + (size_t)s*config.d2d_size, size,
         (s << IMM_SLOT_SHIFT) | IMM_D2D_WRITE, FABRIC_CTRL);
   } else {
-    doca_fabric->send_imm(lane_of_thread(tid), idx, IMM_D2D_RDMA, send_off, size, id.as_int());   // push (send)
+    // push (send): the length rides in the immediate for the DPA leg, which cannot report it.
+    doca_fabric->send_imm(lane_of_thread(tid), idx, fabric_send_imm(IMM_D2D_RDMA, (uint32_t)size),
+        send_off, size, id.as_int());
   }
 #else
   if (config.d2d_mode == D2D_READ) {
