@@ -40,6 +40,10 @@ class DpaD2D {
     // Ranks default to local; anything left local is counted and dropped rather than forwarded.
     void route_to_peer(int rank);
 
+    // Non-zero makes a receiving side acknowledge each freed buffer, which is what returns its
+    // credit to the peer. A side that never sends stops after the initially advertised supply.
+    void set_ack(size_t len);
+
     // Posts every engine's receives and starts the threads. Nothing may be routed before this.
     void start();
 
@@ -68,6 +72,7 @@ class DpaD2D {
     uint64_t args_dev = 0;
     Engine *engines = nullptr;
     uint8_t route[kMaxRanks];
+    size_t ack_len = 0;
 };
 
 } // namespace buddy::rdma

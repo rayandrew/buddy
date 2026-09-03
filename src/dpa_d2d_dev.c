@@ -65,6 +65,7 @@ struct d2d_engine {
 	 * the Arm. tx_len is zero when this engine only routes. */
 	uint64_t tx_base;
 	uint64_t tx_len;
+	uint64_t ack_len;       /* non-zero makes a receiving side acknowledge, freeing its credit */
 	uint32_t ntx;
 	uint32_t next_tx;
 
@@ -150,7 +151,19 @@ static void route_buffer(struct d2d_engine *e, uint32_t idx, uint64_t len)
 	}
 
 	/* Nothing was forwarded out of it, so it is free immediately. */
-	if (e->refcount[idx] == 0) repost(e, idx);
+	if (e->refcount[idx] == 0) {
+		repost(e, idx);
+		/* Tell the peer the buffer is free again. A side that only receives never sends, so
+		 * nothing carries that back and it stops after the initially advertised supply:
+		 * measured as exactly 128 posted plus 383 re-posts, every run. buddy's ACK does this
+		 * job, which is why the credit protocol has to live here too. */
+		if (e->ack_len) {
+			((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = D2D_GEN;
+			doca_dpa_dev_rdma_post_send_imm(e->rdma[0], 0, e->mmap, e->tx_base,
+							e->ack_len, 0,
+							DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
+		}
+	}
 }
 
 static void post_generated(struct d2d_engine *e)
@@ -228,7 +241,7 @@ __dpa_global__ void d2d_handler(uint64_t arg)
 						((uint32_t *)e->pending_addr)[e->pend_head++ %
 								 D2D_PENDING];
 					if (idx == D2D_GEN)
-						post_generated(e);
+						{ if (e->tx_len) post_generated(e); }
 					else if (e->refcount[idx] && --e->refcount[idx] == 0)
 						repost(e, idx);
 				}

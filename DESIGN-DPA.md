@@ -135,13 +135,15 @@ once there are enough engines.
 in four seconds with none, 2.02M with one, 1.85M with two. Traffic continues only on the surviving
 engines, which is what made the errors look harmless at first.
 
-**A receive-only side stops after a fixed number of posts.** With one engine the failure is exact
-and repeatable: 128 posted at arm plus 383 re-posts, then `RECV_ERR`, every run. Nothing appears in
-the kernel log, so this is an ordinary completion error rather than a device event. The echo, which
-posts a send *and* a receive on every completion, sustains 7.2M receives with no such limit. This is
-the same trap the first fabric hit: a side that only receives never rings anything, so its re-posts
-do not take effect. `doca_dpa_dev_rdma_receive_ack` is not the remedy - calling it per completion
-makes the failure immediate, at exactly the initial pool size.
+**A receive limit that has since gone, cause unattributed.** For a while a single engine died at
+exactly 128 posts plus 383 re-posts, every run, with `RECV_ERR` and nothing in the kernel log. It no
+longer happens: the same configuration now sustains 374k messages with zero errors, reproducibly.
+The fix is somewhere between carrying the receive index in a FIFO and the edits after it, and which
+one is not established. Recorded because the arithmetic looked like receive-queue exhaustion and was
+not, and because a limit that vanishes without explanation may come back.
+
+`doca_dpa_dev_rdma_receive_ack` is not a reclaim mechanism here: calling it per completion makes the
+engine die immediately, at exactly the initial pool size.
 
 **Forwarding out of the receive buffer can deadlock.** In forward mode both sides stall after about
 1255 buffers with no errors at all. A buffer is unavailable for receiving while a forward taken from

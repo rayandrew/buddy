@@ -48,6 +48,7 @@ struct d2d_engine_arg {
 
 	uint64_t tx_base;
 	uint64_t tx_len;
+	uint64_t ack_len;
 	uint32_t ntx;
 	uint32_t next_tx;
 
@@ -225,6 +226,8 @@ void DpaD2D::route_to_peer(int rank)
 	route[rank] = 0;
 }
 
+void DpaD2D::set_ack(size_t len) { ack_len = len; }
+
 void DpaD2D::start()
 {
 	doca_dpa_dev_t dpa_handle = 0;
@@ -247,6 +250,7 @@ void DpaD2D::start()
 		a.buf_size = buf_size;
 		a.nrx = bufs_per_engine;
 		a.ntx = bufs_per_engine;
+		a.ack_len = ack_len;
 		a.pending_addr = pending_dev + (uint64_t)sizeof(uint32_t) * 8192 * i;
 		a.rxfifo_addr = rxfifo_dev + (uint64_t)sizeof(uint32_t) * 8192 * i;
 		a.num_ranks = kMaxRanks;

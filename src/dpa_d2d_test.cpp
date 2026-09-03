@@ -70,6 +70,7 @@ int main(int argc, char **argv)
 	const int seconds = env_int("D2D_SECONDS", 5);
 
 	buddy::rdma::DpaD2D d2d(engines, bufs, size);
+	d2d.set_ack((size_t)env_int("D2D_ACK", 64));
 	if (env_int("D2D_FORWARD", 0))
 		for (int r = 0; r < (int)buddy::rdma::DpaD2D::kMaxRanks; r++) d2d.route_to_peer(r);
 
