@@ -129,9 +129,26 @@ threads. Sixteen engines is no better than twelve, so the knee is around twelve.
 Depth is capped by work per wake and does not need raising: a window of 16 per engine is enough
 once there are enough engines.
 
-The occasional `RECV_ERR` is not proportional to engine count - seven at eight engines, none at
-twelve, one at sixteen - so it is timing dependent rather than a per-engine start-up race. It does
-not stop traffic: the runs above sustain full rate through it.
+### Two limits found, and what they mean
+
+**An error kills the engine that hit it.** Throughput tracks the error count exactly: 2.91M messages
+in four seconds with none, 2.02M with one, 1.85M with two. Traffic continues only on the surviving
+engines, which is what made the errors look harmless at first.
+
+**A receive-only side stops after a fixed number of posts.** With one engine the failure is exact
+and repeatable: 128 posted at arm plus 383 re-posts, then `RECV_ERR`, every run. Nothing appears in
+the kernel log, so this is an ordinary completion error rather than a device event. The echo, which
+posts a send *and* a receive on every completion, sustains 7.2M receives with no such limit. This is
+the same trap the first fabric hit: a side that only receives never rings anything, so its re-posts
+do not take effect. `doca_dpa_dev_rdma_receive_ack` is not the remedy - calling it per completion
+makes the failure immediate, at exactly the initial pool size.
+
+**Forwarding out of the receive buffer can deadlock.** In forward mode both sides stall after about
+1255 buffers with no errors at all. A buffer is unavailable for receiving while a forward taken from
+it is in flight, so with symmetric traffic each side can hold every buffer waiting for a send
+completion the peer can no longer produce. Zero copy buys the copy elimination and pays for it with
+this coupling, which is precisely what buddy's credit protocol exists to prevent. Credits therefore
+have to move onto the device as part of the routing step, not after it.
 
 Against ~150k for the DOCA CPU path at buddy's two threads, and 180k for the first DPA fabric which
 also stalled and returned wrong answers. The engine does strictly more work than either, since it
