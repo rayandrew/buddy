@@ -25,7 +25,34 @@ struct echo_arg {
 	uint64_t last_err;
 	uint32_t next_recv;     /* receive buffer to re-post into */
 	uint32_t next_send;
+
+	uint32_t parse;         /* walk each message's request records before echoing */
+	uint64_t records;       /* records seen, so the host can price the walk */
+	uint64_t bad_records;
 };
+
+/* Mirrors buddy::request_head. Records are packed head to tail with no padding, so walking a
+ * buffer is pos += sizeof(head) + head->size. */
+struct request_head {
+	uint32_t size;
+	int32_t dst;
+};
+
+/* What routing on the device costs: the header walk a forwarding decision needs, with no copy.
+ * A real router would post a send per destination run instead of counting. */
+static void walk_records(struct echo_arg *a, uint64_t buf, uint64_t len)
+{
+	uint64_t pos = 0;
+	while (pos + sizeof(struct request_head) <= len) {
+		const struct request_head *h = (const struct request_head *)(buf + pos);
+		if (h->size == 0 || pos + sizeof(*h) + h->size > len) {
+			a->bad_records++;
+			return;
+		}
+		a->records++;
+		pos += sizeof(*h) + h->size;
+	}
+}
 
 /* Posts the initial receives. Only the device can post once the data path is on the DPA, so setup
  * comes through an RPC rather than a host-side task. */
@@ -87,6 +114,9 @@ __dpa_global__ void echo_handler(uint64_t arg_addr)
 				 * a buffer is never both posted for receive and read by a send. */
 				const uint32_t s = a->next_send++ % a->nslot;
 				const uint32_t r = a->next_recv++ % a->nslot;
+				if (a->parse)
+					walk_records(a, a->recv_base + (uint64_t)r * a->slot_size,
+						     a->slot_size);
 				doca_dpa_dev_rdma_post_send_imm(a->rdma, 0, a->mmap,
 								a->send_base +
 									(uint64_t)s * a->slot_size,

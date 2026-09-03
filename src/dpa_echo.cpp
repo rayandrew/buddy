@@ -49,6 +49,15 @@ struct echo_arg {
 	uint64_t last_err;
 	uint32_t next_recv;
 	uint32_t next_send;
+
+	uint32_t parse;
+	uint64_t records;
+	uint64_t bad_records;
+};
+
+struct request_head {
+	uint32_t size;
+	int32_t dst;
 };
 
 #define PORT 18521
@@ -146,6 +155,27 @@ int main(int argc, char **argv)
 	CHECK_DOCA(doca_dpa_mem_alloc(dpa, pool, &buf_dev));
 	CHECK_DOCA(doca_dpa_memset(dpa, buf_dev, 0xAB, pool));
 
+	/* Fill the send buffers with real request records so the device walk has something to parse.
+	 * ECHO_RECORDS records share the slot evenly, which is how buddy aggregates. */
+	const int records = env_int("ECHO_RECORDS", 0);
+	if (records > 0) {
+		const size_t each = slot / (size_t)records;
+		if (each <= sizeof(request_head))
+			FAIL("ECHO_RECORDS=" << records << " leaves no room for a payload in "
+			     << slot << " bytes");
+		char *tmpl = (char *)calloc(1, slot);
+		size_t pos = 0;
+		for (int i = 0; i < records && pos + each <= slot; i++, pos += each) {
+			request_head h = {(uint32_t)(each - sizeof(request_head)), i % 4};
+			memcpy(tmpl + pos, &h, sizeof(h));
+		}
+		for (unsigned i = 0; i < nslot; i++)
+			CHECK_DOCA(doca_dpa_h2d_memcpy(dpa,
+						       buf_dev + (uint64_t)(nslot + i) * slot,
+						       tmpl, slot));
+		free(tmpl);
+	}
+
 	doca_mmap *mmap = nullptr;
 	CHECK_DOCA(doca_mmap_create(&mmap));
 	CHECK_DOCA(doca_mmap_set_permissions(mmap, perms));
@@ -229,6 +259,7 @@ int main(int argc, char **argv)
 	a.send_base = buf_dev + (uint64_t)nslot * slot;
 	a.slot_size = slot;
 	a.nslot = nslot;
+	a.parse = (uint32_t)(records > 0);
 	CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, arg_dev, &a, sizeof(a)));
 
 	CHECK_DOCA(doca_dpa_thread_run(thread));
@@ -252,9 +283,9 @@ int main(int argc, char **argv)
 	for (int i = 0; i < seconds; i++) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		CHECK_DOCA(doca_dpa_d2h_memcpy(dpa, &s, arg_dev, sizeof(s)));
-		printf("dpa-echo %s t=%2ds  %8lu msg/s  handled=%-10lu errors=%lu last_err=0x%lx\n",
-		       server ? "server" : "client", i + 1, s.handled - prev.handled, s.handled,
-		       s.errors, s.last_err);
+		printf("dpa-echo %s t=%2ds  %8lu msg/s  %10lu rec/s  handled=%-10lu errors=%lu bad_rec=%lu\n",
+		       server ? "server" : "client", i + 1, s.handled - prev.handled,
+		       s.records - prev.records, s.handled, s.errors, s.bad_records);
 		fflush(stdout);
 		prev = s;
 	}

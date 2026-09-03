@@ -63,6 +63,37 @@ host x86 --ibverbs RC--> [ DPA memory ] --DOCA RDMA on DPA--> [ remote DPA memor
 The host side of the host leg is unchanged: plain ibverbs against a standard RC queue pair. Only
 the DPU side of that connection becomes DOCA RDMA with `doca_ctx_set_datapath_on_dpa`.
 
+### Measured, with `src/dpa_echo.cpp`
+
+The architecture, before any routing: buffers in DPA memory, a thread woken by completions, the Arm
+sampling a counter and nothing else.
+
+| design | msg/s at 4 KB |
+|---|---|
+| DPA under the Arm, windows and rings | 180k |
+| DOCA CPU path at buddy's two threads | ~150k |
+| DPA native, Arm out of the data path | **723k** |
+
+Sustained for ten seconds, zero errors over 7.2M messages.
+
+The header walk a routing decision needs, one DPA thread:
+
+| records per message | msg/s | records/s | marginal cost per record |
+|---|---|---|---|
+| 0 | 714k | - | - |
+| 8 | 545k | 4.4M | 54 ns |
+| 32 | 311k | 9.9M | 57 ns |
+| 128 | 140k | 17.9M | 45 ns |
+
+A record costs about 50 ns to walk, which is slow next to an Arm core but affordable: even at 128
+records per message a single thread matches the CPU path. The walk is serial inside a buffer, since
+each step depends on the previous `size`, but independent across buffers, so the receive pool is
+split across several threads.
+
+**One API rule.** `doca_dpa_dev_completion_ack(comp, 1)` must be called for each element as it is
+read. Acking a whole drain in one call frees nothing, and traffic stops silently after exactly
+completion-queue-size elements; the stall point tracks the queue size across a 16x range.
+
 ### Routing on the device
 
 A request is eight bytes of header plus payload:
