@@ -76,8 +76,6 @@ class DpaFabric {
     unsigned num_connections;
     char *mem;
     size_t mem_len;
-    bool debug = false;
-    uint32_t max_msg = 0;
 
     doca_dev *dev = nullptr;
     // A DPA process lives on the PF, so the context is created there and extended onto the RDMA

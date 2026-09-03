@@ -83,14 +83,9 @@ struct fabric_arg {
 	uint64_t rwrid_head;
 	uint64_t rwrid_tail;
 
-	uint64_t rack;          /* BUDDY_DPA_RACK: call receive_ack per drained receive */
-	uint64_t always_flush;
 	uint64_t errors;
 	uint64_t last_err;
 	uint64_t stop_addr;     /* device word the Arm sets to break the loop at teardown */
-	uint64_t notify;        /* this thread's own notification handle, rung to re-trigger itself */
-	uint64_t minimal;
-	uint64_t wakes;
 };
 
 /* flags carries FLUSH on the last post of a batch. Without it the context aggregates the work and
@@ -148,8 +143,8 @@ static void drain_submits(struct fabric_arg *a)
 		 * bufcount_remote sends at once and only a handful arrived. */
 		unflushed++;
 		post_one(a, d,
-			 (!a->always_flush && unflushed < FLUSH_EVERY &&
-			  next->seq == a->sub_head + 2 && next->op != OP_RECV)
+			 (unflushed < FLUSH_EVERY && next->seq == a->sub_head + 2 &&
+			  next->op != OP_RECV)
 				 ? DOCA_DPA_DEV_SUBMIT_FLAG_NONE
 				 : DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
 		if (unflushed >= FLUSH_EVERY) unflushed = 0;
@@ -190,7 +185,6 @@ static void drain_completions(struct fabric_arg *a)
 	struct ring_slot *ring = NULL;
 	volatile uint64_t *consumed = NULL;
 	uint32_t acked = 0;
-	uint32_t recvs = 0;
 
 	/* Read the Arm's index once, before any publish. Invalidating the window inside the loop would
 	 * discard publish()'s pending writes. */
@@ -215,7 +209,6 @@ static void drain_completions(struct fabric_arg *a)
 			if (a->rwrid_head != a->rwrid_tail)
 				rid = ((uint64_t *)a->rwrid_addr)[a->rwrid_head++ % WRID_FIFO];
 			publish(ring, a, rid, imm, 0, c, OP_RECV);
-			recvs++;
 			break;
 		}
 		case DOCA_DPA_DEV_COMP_SEND: {
@@ -232,7 +225,6 @@ static void drain_completions(struct fabric_arg *a)
 			a->errors++;
 			a->last_err = t;
 			if (t == DOCA_DPA_DEV_COMP_RECV_ERR) {
-				recvs++;
 				if (a->rwrid_head != a->rwrid_tail) a->rwrid_head++;
 			} else if (a->wrid_head[c] != a->wrid_tail[c]) {
 				a->wrid_head[c]++;
@@ -241,7 +233,6 @@ static void drain_completions(struct fabric_arg *a)
 		}
 		acked++;
 	}
-	if (recvs && a->rack) doca_dpa_dev_rdma_receive_ack(a->rdma, recvs);
 	if (acked) doca_dpa_dev_completion_ack(a->comp, acked);
 }
 
@@ -256,13 +247,7 @@ __dpa_global__ void fabric_kernel(uint64_t arg_addr)
 	struct fabric_arg *a = (struct fabric_arg *)arg_addr;
 	volatile uint64_t *stop;
 
-	/* Distinct markers so the host can tell a kernel that never ran (0) from one that ran and
-	 * found a layout mismatch. */
-	if (a->magic != ARG_MAGIC) {
-		a->wakes = 0xBADF00DULL;
-		return;
-	}
-	a->wakes = 1;
+	if (a->magic != ARG_MAGIC) return;
 
 	stop = (volatile uint64_t *)a->stop_addr;
 	if (a->ctx) doca_dpa_dev_device_set(a->ctx);
@@ -270,6 +255,5 @@ __dpa_global__ void fabric_kernel(uint64_t arg_addr)
 	while (!*stop) {
 		drain_submits(a);
 		drain_completions(a);
-		a->wakes++;
 	}
 }

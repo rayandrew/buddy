@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <endian.h>
-#include <iostream>
 #include <thread>
 
 #include <doca_ctx.h>
@@ -58,14 +57,9 @@ struct fabric_arg {
 	uint64_t rwrid_head;
 	uint64_t rwrid_tail;
 
-	uint64_t rack;
-	uint64_t always_flush;
 	uint64_t errors;
 	uint64_t last_err;
 	uint64_t stop_addr;
-	uint64_t notify;
-	uint64_t minimal;
-	uint64_t wakes;
 };
 
 /* The DPA reaches Arm memory through a window it must explicitly write back, so those writes are not
@@ -147,7 +141,6 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	: num_connections(num_connections), mem(mem), mem_len(mem_len), ring_len(dpa_ring_slots())
 {
 	(void)lanes;
-	debug = getenv("BUDDY_DPA_DEBUG") != nullptr;
 	const uint32_t perms = DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_RDMA_READ |
 			       DOCA_ACCESS_FLAG_RDMA_WRITE;
 	dev = open_dev(dpa_ibdev());
@@ -257,12 +250,6 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 		const doca_error_t bl = doca_rdma_task_receive_set_dst_buf_list_len(rdma, 1);
 		if (bl != DOCA_SUCCESS && bl != DOCA_ERROR_NOT_SUPPORTED)
 			FAIL("doca " << doca_error_get_descr(bl));
-		CHECK_DOCA(doca_rdma_cap_get_max_message_size(info, &max_msg));
-		if (debug)
-			std::cerr << "[dpa] max_sq=" << max_sq << " max_rq=" << max_rq
-				  << " requested=" << buddy::queue_depth()
-				  << " set_rq=" << doca_error_get_name(rq)
-				  << " set_buf_list=" << doca_error_get_name(bl) << std::endl;
 	}
 	CHECK_DOCA(doca_rdma_dpa_completion_attach(rdma, dpa_comp));
 	CHECK_DOCA(doca_ctx_start(ctx));
@@ -299,11 +286,6 @@ void DpaFabric::start_kernel()
 	a.stop_addr = stop_dev;
 	a.wrid_addr = wrid_dev;
 	a.rwrid_addr = rwrid_dev;
-	/* Off by default: acking once per receive completion caps progress at the initially posted
-	 * receive count, while never acking runs 30x further. The API reads as incremental but does
-	 * not behave that way here. */
-	a.rack = getenv("BUDDY_DPA_RACK") ? atoi(getenv("BUDDY_DPA_RACK")) : 0;
-	a.always_flush = getenv("BUDDY_DPA_FLUSH_ALL") ? 1 : 0;
 	CHECK_DOCA(doca_mmap_dev_get_dpa_handle(mmap, dev, (doca_dpa_dev_mmap_t *)&a.local_mmap));
 	a.local_base = (uint64_t)mem;
 	a.num_conns = num_connections;
@@ -321,27 +303,6 @@ void DpaFabric::start_kernel()
 	 * data path until the stop word is set. */
 	CHECK_DOCA(doca_dpa_kernel_launch_update_set(dpa, NULL, 0, NULL, 0, 1, &fabric_kernel,
 						     arg_dev));
-
-	/* BUDDY_DPA_DEBUG=1 reads the kernel's own counters back, which is the only way to tell a
-	 * thread that never ran from one that runs but consumes nothing. */
-	if (getenv("BUDDY_DPA_DEBUG")) {
-		std::thread([this] {
-			for (;;) {
-				fabric_arg d = {};
-				if (doca_dpa_d2h_memcpy(dpa, &d, arg_dev, sizeof(d)) != DOCA_SUCCESS)
-					return;
-				std::cerr << "[dpa] magic=" << std::hex << d.magic << std::dec
-					  << " err=" << d.errors << "/" << std::hex << d.last_err
-					  << std::dec << " wakes=" << d.wakes
-					  << " sub_head=" << d.sub_head
-					  << " tail=" << d.tail << " wrid_tail=" << d.wrid_tail[0]
-					  << " | host sub_tail=" << sub_tail.load()
-					  << " ring_head=" << ring_head.load()
-					  << " consumed=" << *sub_consumed << std::endl;
-				std::this_thread::sleep_for(std::chrono::seconds(2));
-			}
-		}).detach();
-	}
 }
 
 DpaFabric::~DpaFabric()
@@ -439,14 +400,6 @@ uint64_t DpaFabric::submit(uint32_t op, unsigned conn_idx, size_t local_off, siz
 	__atomic_store_n(&d->seq, mine + 1, __ATOMIC_RELEASE);
 	flush_line(d);
 	posted.fetch_add(1, std::memory_order_relaxed);
-
-	if (debug && mine < 16) {
-		static const char *kOp[] = {"SEND", "RECV", "READ", "WRITE"};
-		std::cerr << "[dpa] submit#" << mine << " " << kOp[op & 3] << " conn=" << conn_idx
-			  << " loff=" << local_off << " roff=" << remote_off << " len=" << len
-			  << " imm=0x" << std::hex << be32toh(imm) << std::dec << " wr=" << wr_id
-			  << " (mem_len=" << mem_len << ")" << std::endl;
-	}
 	return mine + 1;
 }
 
@@ -503,13 +456,7 @@ bool DpaFabric::poll(unsigned, completion *c)
 			/* Tell the kernel this slot is free again, or it wraps and overwrites. */
 			__atomic_store_n(ring_consumed, head + 1, __ATOMIC_RELEASE);
 			flush_line(ring_consumed);
-			const uint64_t n = completed.fetch_add(1, std::memory_order_relaxed);
-			if (debug && n < 24) {
-				static const char *kOp[] = {"SEND", "RECV", "READ", "WRITE"};
-				std::cerr << "[dpa] compl#" << n << " " << kOp[c->op & 3]
-					  << " wr=" << c->wr_id << " imm=0x" << std::hex << c->imm
-					  << std::dec << " conn=" << c->conn << std::endl;
-			}
+			completed.fetch_add(1, std::memory_order_relaxed);
 			return true;
 		}
 	}
