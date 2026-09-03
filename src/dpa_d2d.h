@@ -64,6 +64,7 @@ class DpaD2D {
     doca_mmap *mmap = nullptr;
     uint64_t pool_dev = 0;      // rx for every engine, then tx
     uint64_t pending_dev = 0;   // per-engine send FIFO, kept out of the argument block
+    uint64_t rxfifo_dev = 0;    // per-engine record of which buffer each posted receive used
     uint64_t args_dev = 0;
     Engine *engines = nullptr;
     uint8_t route[kMaxRanks];

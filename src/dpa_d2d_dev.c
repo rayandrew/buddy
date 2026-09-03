@@ -54,6 +54,13 @@ struct d2d_engine {
 	uint32_t pend_tail;
 	uint32_t refcount[D2D_MAX_BUFS];
 
+	/* Which buffer each posted receive used, in posting order. The completion's wr_index cannot be
+	 * turned into a buffer index arithmetically: that only holds while receives are re-posted in
+	 * completion order, which stops being true the moment a buffer is held for a forward. */
+	uint64_t rxfifo_addr;
+	uint32_t rx_head;
+	uint32_t rx_tail;
+
 	/* Load generation, so the device can drive itself for a measurement instead of being fed by
 	 * the Arm. tx_len is zero when this engine only routes. */
 	uint64_t tx_base;
@@ -81,6 +88,7 @@ struct d2d_engine {
 
 static void repost(struct d2d_engine *e, uint32_t idx)
 {
+	((uint32_t *)e->rxfifo_addr)[e->rx_tail++ % D2D_PENDING] = idx;
 	doca_dpa_dev_rdma_post_receive(e->rdma[0], e->mmap,
 				       e->rx_base + (uint64_t)idx * e->buf_size, e->buf_size);
 }
@@ -202,8 +210,14 @@ __dpa_global__ void d2d_handler(uint64_t arg)
 			case DOCA_DPA_DEV_COMP_RECV_SEND:
 			case DOCA_DPA_DEV_COMP_RECV_SEND_IMM:
 			case DOCA_DPA_DEV_COMP_RECV_RDMA_WRITE_IMM: {
-				const uint32_t idx = doca_dpa_dev_rdma_completion_get_wr_index(el) %
-						     e->nrx;
+				uint32_t idx;
+				if (e->rx_head == e->rx_tail) {
+					/* A receive completed that was never posted here. */
+					e->errors++;
+					e->last_err = t;
+					break;
+				}
+				idx = ((uint32_t *)e->rxfifo_addr)[e->rx_head++ % D2D_PENDING];
 				e->rx_msgs++;
 				route_buffer(e, idx, e->buf_size);
 				break;

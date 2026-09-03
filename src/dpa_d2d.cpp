@@ -42,6 +42,10 @@ struct d2d_engine_arg {
 	uint32_t pend_tail;
 	uint32_t refcount[512];
 
+	uint64_t rxfifo_addr;
+	uint32_t rx_head;
+	uint32_t rx_tail;
+
 	uint64_t tx_base;
 	uint64_t tx_len;
 	uint32_t ntx;
@@ -135,6 +139,7 @@ DpaD2D::DpaD2D(unsigned num_engines, unsigned bufs_per_engine, size_t buf_size)
 
 	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(d2d_engine_arg) * num_engines, &args_dev));
 	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint32_t) * 8192 * num_engines, &pending_dev));
+	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint32_t) * 8192 * num_engines, &rxfifo_dev));
 
 	engines = new Engine[num_engines];
 	for (unsigned i = 0; i < num_engines; i++) {
@@ -243,6 +248,7 @@ void DpaD2D::start()
 		a.nrx = bufs_per_engine;
 		a.ntx = bufs_per_engine;
 		a.pending_addr = pending_dev + (uint64_t)sizeof(uint32_t) * 8192 * i;
+		a.rxfifo_addr = rxfifo_dev + (uint64_t)sizeof(uint32_t) * 8192 * i;
 		a.num_ranks = kMaxRanks;
 		memcpy(a.route, route, sizeof(route));
 		CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, e.arg_dev, &a, sizeof(a)));
@@ -278,8 +284,10 @@ void DpaD2D::generate(unsigned window, unsigned records)
 	}
 	for (unsigned i = 0; i < num_engines; i++) {
 		uint64_t rc = 0;
+		/* Deliberately short of the buffer. buddy sends d2d_size-16 into a d2d_size receive, and
+		 * a message that exactly fills its receive is a marginal case worth not sitting on. */
 		CHECK_DOCA(doca_dpa_rpc(dpa, &d2d_generate, &rc, engines[i].arg_dev,
-					(uint64_t)window, (uint64_t)buf_size));
+					(uint64_t)window, (uint64_t)(buf_size - 64)));
 	}
 }
 
