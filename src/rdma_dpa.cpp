@@ -137,12 +137,14 @@ static unsigned dpa_ring_slots()
 	return n;
 }
 
-DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsigned lanes)
-	: num_connections(num_connections), mem(mem), mem_len(mem_len), ring_len(dpa_ring_slots())
-{
-	(void)lanes;
-	const uint32_t perms = DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_RDMA_READ |
+static const uint32_t kPerms = DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_RDMA_READ |
 			       DOCA_ACCESS_FLAG_RDMA_WRITE;
+
+DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsigned num_lanes)
+	: num_connections(num_connections), num_lanes(num_lanes ? num_lanes : 1), mem(mem),
+	  mem_len(mem_len), ring_len(dpa_ring_slots())
+{
+	if (num_connections > kMaxConns) FAIL("dpa fabric supports at most " << kMaxConns << " peers");
 	dev = open_dev(dpa_ibdev());
 	pf_dev = open_dev(dpa_pf_ibdev());
 
@@ -154,6 +156,20 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	else
 		dpa = pf_dpa;
 
+	CHECK_DOCA(doca_mmap_create(&mmap));
+	CHECK_DOCA(doca_mmap_add_dev(mmap, dev));
+	CHECK_DOCA(doca_mmap_set_permissions(mmap, kPerms));
+	CHECK_DOCA(doca_mmap_set_memrange(mmap, mem, mem_len));
+	CHECK_DOCA(doca_mmap_start(mmap));
+
+	remote_mmap = new doca_mmap *[num_connections]();
+	lanes = new Lane[this->num_lanes];
+	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(fabric_arg) * this->num_lanes, &args_dev));
+	for (unsigned i = 0; i < this->num_lanes; i++) init_lane(lanes[i]);
+}
+
+void DpaFabric::init_lane(Lane &l)
+{
 	/* Both rings are registered on the PF: doca_dpa_dev_mmap_get_external_ptr only works for an
 	 * mmap and handle from the PF context, not the extended one. */
 	/* 64B-aligned: the DPA reaches these through a window with a 64B alignment restriction, and a
@@ -161,74 +177,65 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	/* ring_consumed shares the mapping but its own cache line: without it the kernel would wrap and
 	 * overwrite completions the proxy has not read yet, losing them silently. */
 	const size_t ring_bytes = kLineSize + sizeof(ring_slot) * ring_len;
-	ring_mem = (char *)aligned_alloc(kLineSize, ring_bytes);
-	if (!ring_mem) FAIL("dpa ring allocation failed");
-	memset(ring_mem, 0, ring_bytes);
-	flush_range(ring_mem, ring_bytes);
-	ring_consumed = (uint64_t *)ring_mem;
-	ring = (ring_slot *)(ring_mem + kLineSize);
-	CHECK_DOCA(doca_mmap_create(&ring_mmap));
-	CHECK_DOCA(doca_mmap_add_dev(ring_mmap, pf_dev));
-	CHECK_DOCA(doca_mmap_set_permissions(ring_mmap, perms));
-	CHECK_DOCA(doca_mmap_set_memrange(ring_mmap, ring_mem, ring_bytes));
-	CHECK_DOCA(doca_mmap_start(ring_mmap));
+	l.ring_mem = (char *)aligned_alloc(kLineSize, ring_bytes);
+	if (!l.ring_mem) FAIL("dpa ring allocation failed");
+	memset(l.ring_mem, 0, ring_bytes);
+	flush_range(l.ring_mem, ring_bytes);
+	l.ring_consumed = (uint64_t *)l.ring_mem;
+	l.ring = (ring_slot *)(l.ring_mem + kLineSize);
+	CHECK_DOCA(doca_mmap_create(&l.ring_mmap));
+	CHECK_DOCA(doca_mmap_add_dev(l.ring_mmap, pf_dev));
+	CHECK_DOCA(doca_mmap_set_permissions(l.ring_mmap, kPerms));
+	CHECK_DOCA(doca_mmap_set_memrange(l.ring_mmap, l.ring_mem, ring_bytes));
+	CHECK_DOCA(doca_mmap_start(l.ring_mmap));
 
 	/* sub_consumed shares the mapping but its own cache line. */
-	sub_mem = (char *)aligned_alloc(kLineSize, kLineSize + sizeof(submit_slot) * ring_len);
-	if (!sub_mem) FAIL("dpa submit ring allocation failed");
-	memset(sub_mem, 0, kLineSize + sizeof(submit_slot) * ring_len);
-	flush_range(sub_mem, kLineSize + sizeof(submit_slot) * ring_len);
-	sub_consumed = (uint64_t *)sub_mem;
-	sub = (submit_slot *)(sub_mem + kLineSize);
-	CHECK_DOCA(doca_mmap_create(&sub_mmap));
-	CHECK_DOCA(doca_mmap_add_dev(sub_mmap, pf_dev));
-	CHECK_DOCA(doca_mmap_set_permissions(sub_mmap, perms));
-	CHECK_DOCA(doca_mmap_set_memrange(sub_mmap, sub_mem,
-					  kLineSize + sizeof(submit_slot) * ring_len));
-	CHECK_DOCA(doca_mmap_start(sub_mmap));
+	const size_t sub_bytes = kLineSize + sizeof(submit_slot) * ring_len;
+	l.sub_mem = (char *)aligned_alloc(kLineSize, sub_bytes);
+	if (!l.sub_mem) FAIL("dpa submit ring allocation failed");
+	memset(l.sub_mem, 0, sub_bytes);
+	flush_range(l.sub_mem, sub_bytes);
+	l.sub_consumed = (uint64_t *)l.sub_mem;
+	l.sub = (submit_slot *)(l.sub_mem + kLineSize);
+	CHECK_DOCA(doca_mmap_create(&l.sub_mmap));
+	CHECK_DOCA(doca_mmap_add_dev(l.sub_mmap, pf_dev));
+	CHECK_DOCA(doca_mmap_set_permissions(l.sub_mmap, kPerms));
+	CHECK_DOCA(doca_mmap_set_memrange(l.sub_mmap, l.sub_mem, sub_bytes));
+	CHECK_DOCA(doca_mmap_start(l.sub_mmap));
 
-	CHECK_DOCA(doca_mmap_create(&mmap));
-	CHECK_DOCA(doca_mmap_add_dev(mmap, dev));
-	CHECK_DOCA(doca_mmap_set_permissions(mmap, perms));
-	CHECK_DOCA(doca_mmap_set_memrange(mmap, mem, mem_len));
-	CHECK_DOCA(doca_mmap_start(mmap));
-
-	/* The thread reads its local storage while starting, so the argument block comes first. */
-	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(fabric_arg), &arg_dev));
-	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t), &stop_dev));
-	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t) * kMaxConns * kWridFifo, &wrid_dev));
-	CHECK_DOCA(doca_dpa_memset(dpa, wrid_dev, 0, sizeof(uint64_t) * kMaxConns * kWridFifo));
-	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t) * kWridFifo, &rwrid_dev));
-	CHECK_DOCA(doca_dpa_memset(dpa, rwrid_dev, 0, sizeof(uint64_t) * kWridFifo));
+	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t), &l.stop_dev));
+	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t) * kMaxConns * kWridFifo, &l.wrid_dev));
+	CHECK_DOCA(doca_dpa_memset(dpa, l.wrid_dev, 0, sizeof(uint64_t) * kMaxConns * kWridFifo));
+	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint64_t) * kWridFifo, &l.rwrid_dev));
+	CHECK_DOCA(doca_dpa_memset(dpa, l.rwrid_dev, 0, sizeof(uint64_t) * kWridFifo));
 	{
 		const uint64_t zero = 0;
-		CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, stop_dev, (void *)&zero, sizeof(zero)));
+		CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, l.stop_dev, (void *)&zero, sizeof(zero)));
 	}
 	/* A completion context still needs a thread object to attach to, but that thread is never
-	 * run: the data path is the launched kernel below, not a thread activation. */
-	CHECK_DOCA(doca_dpa_thread_create(dpa, &thread));
-	CHECK_DOCA(doca_dpa_thread_set_func_arg(thread, &fabric_kernel, 0));
-	CHECK_DOCA(doca_dpa_thread_start(thread));
+	 * run: the data path is the launched kernel, not a thread activation. */
+	CHECK_DOCA(doca_dpa_thread_create(dpa, &l.thread));
+	CHECK_DOCA(doca_dpa_thread_set_func_arg(l.thread, &fabric_kernel, 0));
+	CHECK_DOCA(doca_dpa_thread_start(l.thread));
 
-	CHECK_DOCA(doca_dpa_completion_create(dpa, 4096, &dpa_comp));
-	CHECK_DOCA(doca_dpa_completion_set_thread(dpa_comp, thread));
-	CHECK_DOCA(doca_dpa_completion_start(dpa_comp));
+	CHECK_DOCA(doca_dpa_completion_create(dpa, 4096, &l.comp));
+	CHECK_DOCA(doca_dpa_completion_set_thread(l.comp, l.thread));
+	CHECK_DOCA(doca_dpa_completion_start(l.comp));
 
-	CHECK_DOCA(doca_rdma_create(dev, &rdma));
-	ctx = doca_rdma_as_ctx(rdma);
-	CHECK_DOCA(doca_ctx_set_datapath_on_dpa(ctx, dpa));
-	CHECK_DOCA(doca_rdma_set_permissions(rdma, perms));
-	CHECK_DOCA(doca_rdma_set_grh_enabled(rdma, 1));
+	CHECK_DOCA(doca_rdma_create(dev, &l.rdma));
+	l.ctx = doca_rdma_as_ctx(l.rdma);
+	CHECK_DOCA(doca_ctx_set_datapath_on_dpa(l.ctx, dpa));
+	CHECK_DOCA(doca_rdma_set_permissions(l.rdma, kPerms));
+	CHECK_DOCA(doca_rdma_set_grh_enabled(l.rdma, 1));
 	/* Same GID as the other legs. Left unset the connection still establishes and the data lands
 	 * wrong, which surfaces only as a RECV_ERR completion. */
-	CHECK_DOCA(doca_rdma_set_gid_index(rdma, dpa_gid()));
-	CHECK_DOCA(doca_rdma_set_max_num_connections(rdma, num_connections));
-	CHECK_DOCA(doca_rdma_set_rnr_retry_count(rdma, 7));
+	CHECK_DOCA(doca_rdma_set_gid_index(l.rdma, dpa_gid()));
+	CHECK_DOCA(doca_rdma_set_max_num_connections(l.rdma, num_connections));
+	CHECK_DOCA(doca_rdma_set_rnr_retry_count(l.rdma, 7));
 	/* buddy sends d2d_size-16 (4080 B by default). Measured: the DPA path completes 1 KB sends and
-	 * silently drops 4080 B ones. Raising the MTU is not permitted here, so the ceiling is
-	 * whatever the device reports; the check below turns exceeding it into a clear failure. */
+	 * silently drops 4080 B ones. */
 	{
-		const doca_error_t mtu = doca_rdma_set_mtu(rdma, DOCA_MTU_SIZE_4K_BYTES);
+		const doca_error_t mtu = doca_rdma_set_mtu(l.rdma, DOCA_MTU_SIZE_4K_BYTES);
 		if (mtu != DOCA_SUCCESS && mtu != DOCA_ERROR_NOT_SUPPORTED)
 			FAIL("doca " << doca_error_get_descr(mtu));
 	}
@@ -241,83 +248,100 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 		uint32_t max_sq = 0, max_rq = 0;
 		CHECK_DOCA(doca_rdma_cap_get_max_send_queue_size(info, &max_sq));
 		CHECK_DOCA(doca_rdma_cap_get_max_recv_queue_size(info, &max_rq));
-		CHECK_DOCA(doca_rdma_set_send_queue_size(rdma, std::min<uint32_t>(buddy::queue_depth(), max_sq)));
-		const doca_error_t rq = doca_rdma_set_recv_queue_size(rdma, std::min<uint32_t>(buddy::queue_depth(), max_rq));
+		CHECK_DOCA(doca_rdma_set_send_queue_size(l.rdma, std::min<uint32_t>(buddy::queue_depth(), max_sq)));
+		const doca_error_t rq = doca_rdma_set_recv_queue_size(l.rdma, std::min<uint32_t>(buddy::queue_depth(), max_rq));
 		if (rq != DOCA_SUCCESS && rq != DOCA_ERROR_NOT_SUPPORTED)
 			FAIL("doca " << doca_error_get_descr(rq));
 		/* Measured: at the default list length each post_receive reserves four receive-queue
 		 * entries, so only one receive in four is usable. buddy chains no buffers. */
-		const doca_error_t bl = doca_rdma_task_receive_set_dst_buf_list_len(rdma, 1);
+		const doca_error_t bl = doca_rdma_task_receive_set_dst_buf_list_len(l.rdma, 1);
 		if (bl != DOCA_SUCCESS && bl != DOCA_ERROR_NOT_SUPPORTED)
 			FAIL("doca " << doca_error_get_descr(bl));
 	}
-	CHECK_DOCA(doca_rdma_dpa_completion_attach(rdma, dpa_comp));
-	CHECK_DOCA(doca_ctx_start(ctx));
-	CHECK_DOCA(doca_rdma_get_dpa_handle(rdma, &dpa_rdma_handle));
+	CHECK_DOCA(doca_rdma_dpa_completion_attach(l.rdma, l.comp));
+	CHECK_DOCA(doca_ctx_start(l.ctx));
+	CHECK_DOCA(doca_rdma_get_dpa_handle(l.rdma, &l.rdma_handle));
 
-	if (num_connections > kMaxConns) FAIL("dpa fabric supports at most " << kMaxConns << " peers");
-	conns = new doca_rdma_connection *[num_connections]();
-	remote_mmap = new doca_mmap *[num_connections]();
+	l.conns = new doca_rdma_connection *[num_connections]();
 }
 
-/* The kernel cannot run until every peer's mmap handle is known, so the argument block is filled
- * and the thread started only after all connections are up. */
-void DpaFabric::start_kernel()
+/* The kernels cannot run until every peer's mmap handle is known, so the argument blocks are filled
+ * and the launch issued only after all connections are up.
+ *
+ * One launch for every lane: fabric_kernel never returns, so a second launch on this context would
+ * queue behind the first and never start. Each DPA thread picks its lane by rank. */
+void DpaFabric::launch_kernels()
 {
 	doca_dpa_dev_t dpa_handle = 0;
 	CHECK_DOCA(doca_dpa_get_dpa_handle(dpa, &dpa_handle));
-	uint64_t comp_handle = 0;
-	CHECK_DOCA(doca_dpa_completion_get_dpa_handle(dpa_comp, &comp_handle));
 
-	fabric_arg a = {};
-	a.magic = kArgMagic;
-	a.ctx = dpa_handle;
-	a.comp = comp_handle;
-	a.rdma = dpa_rdma_handle;
-	CHECK_DOCA(doca_mmap_dev_get_dpa_handle(sub_mmap, pf_dev, (doca_dpa_dev_mmap_t *)&a.sub_mmap));
-	a.sub_addr = (uint64_t)sub;
-	a.sub_len = ring_len;
-	a.consumed_addr = (uint64_t)sub_consumed;
-	CHECK_DOCA(doca_mmap_dev_get_dpa_handle(ring_mmap, pf_dev,
-						(doca_dpa_dev_mmap_t *)&a.ring_mmap));
-	a.ring_addr = (uint64_t)ring;
-	a.ring_len = ring_len;
-	a.ring_consumed_addr = (uint64_t)ring_consumed;
-	a.stop_addr = stop_dev;
-	a.wrid_addr = wrid_dev;
-	a.rwrid_addr = rwrid_dev;
-	CHECK_DOCA(doca_mmap_dev_get_dpa_handle(mmap, dev, (doca_dpa_dev_mmap_t *)&a.local_mmap));
-	a.local_base = (uint64_t)mem;
-	a.num_conns = num_connections;
-	for (unsigned i = 0; i < num_connections; i++) {
-		CHECK_DOCA(doca_mmap_dev_get_dpa_handle(remote_mmap[i], dev,
-							(doca_dpa_dev_mmap_t *)&a.remote_mmap[i]));
-		void *rbase; size_t rlen;
-		CHECK_DOCA(doca_mmap_get_memrange(remote_mmap[i], &rbase, &rlen));
-		a.remote_base[i] = (uint64_t)rbase;
+	fabric_arg *args = new fabric_arg[num_lanes]();
+	for (unsigned n = 0; n < num_lanes; n++) {
+		Lane &l = lanes[n];
+		fabric_arg &a = args[n];
+		uint64_t comp_handle = 0;
+		CHECK_DOCA(doca_dpa_completion_get_dpa_handle(l.comp, &comp_handle));
+
+		a.magic = kArgMagic;
+		a.ctx = dpa_handle;
+		a.comp = comp_handle;
+		a.rdma = l.rdma_handle;
+		CHECK_DOCA(doca_mmap_dev_get_dpa_handle(l.sub_mmap, pf_dev,
+							(doca_dpa_dev_mmap_t *)&a.sub_mmap));
+		a.sub_addr = (uint64_t)l.sub;
+		a.sub_len = ring_len;
+		a.consumed_addr = (uint64_t)l.sub_consumed;
+		CHECK_DOCA(doca_mmap_dev_get_dpa_handle(l.ring_mmap, pf_dev,
+							(doca_dpa_dev_mmap_t *)&a.ring_mmap));
+		a.ring_addr = (uint64_t)l.ring;
+		a.ring_len = ring_len;
+		a.ring_consumed_addr = (uint64_t)l.ring_consumed;
+		a.stop_addr = l.stop_dev;
+		a.wrid_addr = l.wrid_dev;
+		a.rwrid_addr = l.rwrid_dev;
+		CHECK_DOCA(doca_mmap_dev_get_dpa_handle(mmap, dev, (doca_dpa_dev_mmap_t *)&a.local_mmap));
+		a.local_base = (uint64_t)mem;
+		a.num_conns = num_connections;
+		for (unsigned i = 0; i < num_connections; i++) {
+			CHECK_DOCA(doca_mmap_dev_get_dpa_handle(remote_mmap[i], dev,
+								(doca_dpa_dev_mmap_t *)&a.remote_mmap[i]));
+			void *rbase; size_t rlen;
+			CHECK_DOCA(doca_mmap_get_memrange(remote_mmap[i], &rbase, &rlen));
+			a.remote_base[i] = (uint64_t)rbase;
+		}
 	}
 
-	CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, arg_dev, &a, sizeof(a)));
+	CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, args_dev, args, sizeof(fabric_arg) * num_lanes));
+	delete[] args;
 
-	/* Asynchronous: the call returns once the launch is submitted, and the kernel then owns the
-	 * data path until the stop word is set. */
-	CHECK_DOCA(doca_dpa_kernel_launch_update_set(dpa, NULL, 0, NULL, 0, 1, &fabric_kernel,
-						     arg_dev));
+	/* Asynchronous: the call returns once the launch is submitted, and the kernels then own one
+	 * execution unit each until their stop word is set. */
+	CHECK_DOCA(doca_dpa_kernel_launch_update_set(dpa, NULL, 0, NULL, 0, num_lanes, &fabric_kernel,
+						     args_dev));
 }
 
 DpaFabric::~DpaFabric()
 {
-	/* Release the spinning kernel's EU before tearing down anything it touches. */
-	if (stop_dev) {
+	/* Release every spinning kernel's EU before tearing down anything they touch. */
+	for (unsigned i = 0; i < num_lanes; i++) {
+		if (!lanes[i].stop_dev) continue;
 		const uint64_t one = 1;
-		doca_dpa_h2d_memcpy(dpa, stop_dev, (void *)&one, sizeof(one));
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		doca_dpa_h2d_memcpy(dpa, lanes[i].stop_dev, (void *)&one, sizeof(one));
 	}
-	doca_ctx_stop(ctx);
-	doca_rdma_destroy(rdma);
-	doca_dpa_completion_destroy(dpa_comp);
-	doca_dpa_thread_destroy(thread);
-	doca_mmap_destroy(ring_mmap);
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+	for (unsigned i = 0; i < num_lanes; i++) {
+		Lane &l = lanes[i];
+		if (l.ctx) doca_ctx_stop(l.ctx);
+		if (l.rdma) doca_rdma_destroy(l.rdma);
+		if (l.comp) doca_dpa_completion_destroy(l.comp);
+		if (l.thread) doca_dpa_thread_destroy(l.thread);
+		if (l.ring_mmap) doca_mmap_destroy(l.ring_mmap);
+		if (l.sub_mmap) doca_mmap_destroy(l.sub_mmap);
+		delete[] l.conns;
+		free(l.ring_mem);
+		free(l.sub_mem);
+	}
 	doca_mmap_destroy(mmap);
 	for (unsigned i = 0; i < num_connections; i++)
 		if (remote_mmap[i]) doca_mmap_destroy(remote_mmap[i]);
@@ -325,28 +349,29 @@ DpaFabric::~DpaFabric()
 	doca_dpa_destroy(pf_dpa);
 	if (pf_dev != dev) doca_dev_close(pf_dev);
 	doca_dev_close(dev);
-	delete[] conns;
-	doca_mmap_destroy(sub_mmap);
 	delete[] remote_mmap;
-	free(ring_mem);
-	free(sub_mem);
+	delete[] lanes;
 }
 
 void DpaFabric::connect(unsigned idx, int sock, bool is_server)
 {
-	const void *blob;
-	size_t blob_len;
-	CHECK_DOCA(doca_rdma_export(rdma, &blob, &blob_len, &conns[idx]));
+	/* Lane order is the same on both ends, so lane i pairs with the peer's lane i. */
+	for (unsigned i = 0; i < num_lanes; i++) {
+		Lane &l = lanes[i];
+		const void *blob;
+		size_t blob_len;
+		CHECK_DOCA(doca_rdma_export(l.rdma, &blob, &blob_len, &l.conns[idx]));
 
-	uint64_t bl = blob_len;
-	full_write(sock, (char *)&bl, sizeof(bl));
-	full_write(sock, (char *)blob, blob_len);
-	uint64_t pbl;
-	full_read(sock, (char *)&pbl, sizeof(pbl));
-	char *pblob = new char[pbl];
-	full_read(sock, pblob, pbl);
-	CHECK_DOCA(doca_rdma_connect(rdma, pblob, pbl, conns[idx]));
-	delete[] pblob;
+		uint64_t bl = blob_len;
+		full_write(sock, (char *)&bl, sizeof(bl));
+		full_write(sock, (char *)blob, blob_len);
+		uint64_t pbl;
+		full_read(sock, (char *)&pbl, sizeof(pbl));
+		char *pblob = new char[pbl];
+		full_read(sock, pblob, pbl);
+		CHECK_DOCA(doca_rdma_connect(l.rdma, pblob, pbl, l.conns[idx]));
+		delete[] pblob;
+	}
 
 	const void *mdesc;
 	size_t mdesc_len;
@@ -365,16 +390,19 @@ void DpaFabric::connect(unsigned idx, int sock, bool is_server)
 
 void DpaFabric::wait_connected(double timeout_s)
 {
-	enum doca_ctx_states cs;
 	const auto deadline = std::chrono::steady_clock::now() +
 			      std::chrono::duration<double>(timeout_s);
-	for (;;) {
-		doca_ctx_get_state(ctx, &cs);
-		if (cs == DOCA_CTX_STATE_RUNNING) { start_kernel(); return; }
-		if (std::chrono::steady_clock::now() > deadline)
-			FAIL("dpa rdma ctx did not reach RUNNING in " << timeout_s << " s");
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	for (unsigned i = 0; i < num_lanes; i++) {
+		enum doca_ctx_states cs;
+		for (;;) {
+			doca_ctx_get_state(lanes[i].ctx, &cs);
+			if (cs == DOCA_CTX_STATE_RUNNING) break;
+			if (std::chrono::steady_clock::now() > deadline)
+				FAIL("dpa rdma ctx did not reach RUNNING in " << timeout_s << " s");
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
 	}
+	launch_kernels();
 }
 
 /* seq goes last so the kernel never reads a half-written descriptor. Spinning on a full ring is the
@@ -382,14 +410,15 @@ void DpaFabric::wait_connected(double timeout_s)
  *
  * The kernel drains strictly in order, so a thread that publishes its slot before a lower-numbered
  * one is published just leaves the kernel waiting at the gap; it does not reorder or lose work. */
-uint64_t DpaFabric::submit(uint32_t op, unsigned conn_idx, size_t local_off, size_t remote_off,
-			   size_t len, uint32_t imm, uint64_t wr_id)
+uint64_t DpaFabric::submit(Lane &l, uint32_t op, unsigned conn_idx, size_t local_off,
+			   size_t remote_off, size_t len, uint32_t imm, uint64_t wr_id)
 {
-	const uint64_t mine = sub_tail.fetch_add(1, std::memory_order_relaxed);
-	while (inv_line(sub_consumed), mine - __atomic_load_n(sub_consumed, __ATOMIC_ACQUIRE) >= ring_len)
+	const uint64_t mine = l.sub_tail.fetch_add(1, std::memory_order_relaxed);
+	while (inv_line(l.sub_consumed),
+	       mine - __atomic_load_n(l.sub_consumed, __ATOMIC_ACQUIRE) >= ring_len)
 		asm volatile("yield" ::: "memory");
 
-	submit_slot *d = &sub[mine % ring_len];
+	submit_slot *d = &l.sub[mine % ring_len];
 	d->wr_id = wr_id;
 	d->local_off = local_off;
 	d->remote_off = remote_off;
@@ -399,51 +428,53 @@ uint64_t DpaFabric::submit(uint32_t op, unsigned conn_idx, size_t local_off, siz
 	d->op = op;
 	__atomic_store_n(&d->seq, mine + 1, __ATOMIC_RELEASE);
 	flush_line(d);
-	posted.fetch_add(1, std::memory_order_relaxed);
+	l.posted.fetch_add(1, std::memory_order_relaxed);
 	return mine + 1;
 }
 
-void DpaFabric::send_imm(unsigned, unsigned conn_idx, uint32_t imm, size_t offset, size_t len,
+void DpaFabric::send_imm(unsigned lane, unsigned conn_idx, uint32_t imm, size_t offset, size_t len,
 			 uint64_t wr_id)
 {
-	submit(OP_SEND, conn_idx, offset, 0, len, htobe32(imm), wr_id);
+	submit(lane_of(lane), OP_SEND, conn_idx, offset, 0, len, htobe32(imm), wr_id);
 }
 
 /* Blocks until the DPA has actually posted it. DocaRdma::post_recv is synchronous, and buddy relies
  * on that: it posts its receives during setup and starts sending with no barrier in between, so a
  * receive that is merely queued lets the peer's send arrive first and fail with RECV_ERR. */
-void DpaFabric::post_recv(unsigned, size_t offset, size_t len, uint64_t wr_id)
+void DpaFabric::post_recv(unsigned lane, size_t offset, size_t len, uint64_t wr_id)
 {
-	const uint64_t seq = submit(OP_RECV, 0, offset, 0, len, 0, wr_id);
-	while (inv_line(sub_consumed), __atomic_load_n(sub_consumed, __ATOMIC_ACQUIRE) < seq)
+	Lane &l = lane_of(lane);
+	const uint64_t seq = submit(l, OP_RECV, 0, offset, 0, len, 0, wr_id);
+	while (inv_line(l.sub_consumed), __atomic_load_n(l.sub_consumed, __ATOMIC_ACQUIRE) < seq)
 		asm volatile("yield" ::: "memory");
 }
 
-void DpaFabric::read(unsigned, unsigned conn_idx, size_t local_off, size_t remote_off, size_t len,
-		     uint64_t wr_id)
+void DpaFabric::read(unsigned lane, unsigned conn_idx, size_t local_off, size_t remote_off,
+		     size_t len, uint64_t wr_id)
 {
-	submit(OP_READ, conn_idx, local_off, remote_off, len, 0, wr_id);
+	submit(lane_of(lane), OP_READ, conn_idx, local_off, remote_off, len, 0, wr_id);
 }
 
-void DpaFabric::write(unsigned, unsigned conn_idx, size_t local_off, size_t remote_off, size_t len,
-		      uint64_t wr_id)
+void DpaFabric::write(unsigned lane, unsigned conn_idx, size_t local_off, size_t remote_off,
+		      size_t len, uint64_t wr_id)
 {
-	submit(OP_WRITE, conn_idx, local_off, remote_off, len, 0, wr_id);
+	submit(lane_of(lane), OP_WRITE, conn_idx, local_off, remote_off, len, 0, wr_id);
 }
 
-void DpaFabric::write_imm(unsigned, unsigned conn_idx, size_t local_off, size_t remote_off,
+void DpaFabric::write_imm(unsigned lane, unsigned conn_idx, size_t local_off, size_t remote_off,
 			  size_t len, uint32_t imm, uint64_t wr_id)
 {
-	submit(OP_WRITE, conn_idx, local_off, remote_off, len, htobe32(imm), wr_id);
+	submit(lane_of(lane), OP_WRITE, conn_idx, local_off, remote_off, len, htobe32(imm), wr_id);
 }
 
 /* A slot is ready once its seq passes the head; the kernel writes seq last. The compare-exchange
  * claims the slot, so two threads polling the same lane never take the same completion. */
-bool DpaFabric::poll(unsigned, completion *c)
+bool DpaFabric::poll(unsigned lane, completion *c)
 {
+	Lane &l = lane_of(lane);
 	for (;;) {
-		uint64_t head = ring_head.load(std::memory_order_relaxed);
-		ring_slot *s = &ring[head % ring_len];
+		uint64_t head = l.ring_head.load(std::memory_order_relaxed);
+		ring_slot *s = &l.ring[head % ring_len];
 		inv_line(s);
 		if (__atomic_load_n(&s->seq, __ATOMIC_ACQUIRE) != head + 1) return false;
 		c->wr_id = s->wr_id;
@@ -451,24 +482,25 @@ bool DpaFabric::poll(unsigned, completion *c)
 		c->len = s->len;
 		c->conn = s->conn;
 		c->op = (op_type)s->op;
-		if (ring_head.compare_exchange_weak(head, head + 1, std::memory_order_acq_rel,
-						    std::memory_order_relaxed)) {
+		if (l.ring_head.compare_exchange_weak(head, head + 1, std::memory_order_acq_rel,
+						      std::memory_order_relaxed)) {
 			/* Tell the kernel this slot is free again, or it wraps and overwrites. */
-			__atomic_store_n(ring_consumed, head + 1, __ATOMIC_RELEASE);
-			flush_line(ring_consumed);
-			completed.fetch_add(1, std::memory_order_relaxed);
+			__atomic_store_n(l.ring_consumed, head + 1, __ATOMIC_RELEASE);
+			flush_line(l.ring_consumed);
+			l.completed.fetch_add(1, std::memory_order_relaxed);
 			return true;
 		}
 	}
 }
 
-bool DpaFabric::wait_idle(unsigned, double timeout_s)
+bool DpaFabric::wait_idle(unsigned lane, double timeout_s)
 {
+	Lane &l = lane_of(lane);
 	const auto deadline = std::chrono::steady_clock::now() +
 			      std::chrono::duration<double>(timeout_s);
-	while (completed < posted) {
+	while (l.completed < l.posted) {
 		completion c;
-		if (poll(0, &c)) continue;
+		if (poll(lane, &c)) continue;
 		if (std::chrono::steady_clock::now() > deadline) return false;
 	}
 	return true;

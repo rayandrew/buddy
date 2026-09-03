@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <mutex>
 #include <cstddef>
 #include <cstdint>
 
@@ -12,21 +11,19 @@ struct doca_rdma;
 struct doca_rdma_connection;
 struct doca_ctx;
 struct doca_dpa_completion;
-struct doca_dpa_notification_completion;
 struct doca_dpa_thread;
 
 namespace buddy::rdma {
 
-// D2D transport whose data path runs on a DPA thread instead of on the proxy threads.
+// D2D transport whose data path runs on the DPA instead of on the proxy threads.
 //
 // Same surface as DocaRdma, and the same socket export-blob handshake, so the proxy does not care
 // which is underneath. The difference is where the work happens: submits and completions cross
 // through two rings in host memory, so the proxy issues a store instead of a doca_pe_progress and
 // reads a load instead of polling the engine. Routing stays on the Arm.
 //
-// A DPA context owns one queue pair, so lanes_count() is 1 and every proxy thread shares one pair
-// of rings. Both rings are therefore multi-producer and multi-consumer: threads claim a slot with
-// an atomic index, so calls from any thread are safe on the same lane.
+// One lane is one queue pair, one ring pair and one DPA kernel holding one execution unit, so a
+// proxy thread's operations never queue behind another thread's.
 class DpaFabric {
   public:
     enum op_type { OP_SEND, OP_RECV, OP_READ, OP_WRITE };
@@ -47,16 +44,44 @@ class DpaFabric {
     static constexpr unsigned kWridFifo = 1024;
     static constexpr unsigned kLineSize = 64;
 
-    // lanes is accepted and ignored, so the proxy constructs either fabric the same way. Ring depth
-    // comes from BUDDY_DPA_RING and must exceed the in-flight ceiling bufcount_remote*remotes*threads.
-    DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsigned lanes);
+    struct Lane {
+        doca_rdma *rdma = nullptr;
+        doca_ctx *ctx = nullptr;
+        doca_dpa_completion *comp = nullptr;
+        // Exists only because a completion context requires one; it is never run.
+        doca_dpa_thread *thread = nullptr;
+        uint64_t rdma_handle = 0;
+        doca_rdma_connection **conns = nullptr;
+
+        char *sub_mem = nullptr;
+        submit_slot *sub = nullptr;
+        uint64_t *sub_consumed = nullptr;
+        doca_mmap *sub_mmap = nullptr;
+        std::atomic<uint64_t> sub_tail{0};
+
+        char *ring_mem = nullptr;
+        ring_slot *ring = nullptr;
+        uint64_t *ring_consumed = nullptr;
+        doca_mmap *ring_mmap = nullptr;
+        std::atomic<uint64_t> ring_head{0};
+
+        uint64_t stop_dev = 0;
+        uint64_t wrid_dev = 0;
+        uint64_t rwrid_dev = 0;
+        std::atomic<uint64_t> posted{0};
+        std::atomic<uint64_t> completed{0};
+    };
+
+    // Ring depth comes from BUDDY_DPA_RING and must exceed the per-lane in-flight ceiling
+    // bufcount_remote*remotes.
+    DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsigned num_lanes);
     ~DpaFabric();
 
     void connect(unsigned idx, int sock, bool is_server);
-    // Also starts the DPA thread, which cannot run until every peer's mmap handle is known.
+    // Also launches each lane's kernel, which cannot run until every peer's mmap handle is known.
     void wait_connected(double timeout_s = 60.0);
 
-    // lane is accepted for parity with DocaRdma; one DPA context drives one queue pair.
+    // @p lane selects the owning thread's queues; it must be the calling thread's own lane.
     void send_imm(unsigned lane, unsigned conn_idx, uint32_t imm, size_t offset, size_t len, uint64_t wr_id);
     void post_recv(unsigned lane, size_t offset, size_t len, uint64_t wr_id);
     void read(unsigned lane, unsigned conn_idx, size_t local_off, size_t remote_off, size_t len, uint64_t wr_id);
@@ -65,54 +90,33 @@ class DpaFabric {
     bool poll(unsigned lane, completion *c);
     bool wait_idle(unsigned lane, double timeout_s);
 
-    unsigned lanes_count() const { return 1; }
+    unsigned lanes_count() const { return num_lanes; }
 
   private:
+    Lane &lane_of(unsigned lane) { return lanes[lane < num_lanes ? lane : 0]; }
+    void init_lane(Lane &l);
     // Returns the ring sequence of the slot, so a caller can wait for the DPA to consume it.
-    uint64_t submit(uint32_t op, unsigned conn_idx, size_t local_off, size_t remote_off, size_t len,
-                    uint32_t imm, uint64_t wr_id);
-    void start_kernel();
+    uint64_t submit(Lane &l, uint32_t op, unsigned conn_idx, size_t local_off, size_t remote_off,
+                    size_t len, uint32_t imm, uint64_t wr_id);
+    void launch_kernels();
 
     unsigned num_connections;
+    unsigned num_lanes;
     char *mem;
     size_t mem_len;
+    unsigned ring_len;
 
+    Lane *lanes = nullptr;
+    // One argument block per lane, contiguous: the kernel indexes it by DPA thread rank.
+    uint64_t args_dev = 0;
     doca_dev *dev = nullptr;
     // A DPA process lives on the PF, so the context is created there and extended onto the RDMA
     // scalable function. Creating it directly on the SF fails in FlexIO with a PRM process error.
     doca_dev *pf_dev = nullptr;
     doca_dpa *pf_dpa = nullptr;
     doca_dpa *dpa = nullptr;
-    doca_rdma *rdma = nullptr;
-    doca_ctx *ctx = nullptr;
     doca_mmap *mmap = nullptr;
-    doca_rdma_connection **conns = nullptr;
     doca_mmap **remote_mmap = nullptr;
-
-    doca_dpa_completion *dpa_comp = nullptr;
-    // Exists only because a completion context requires one; it is never run.
-    doca_dpa_thread *thread = nullptr;
-    uint64_t dpa_rdma_handle = 0;
-
-    char *sub_mem = nullptr;
-    submit_slot *sub = nullptr;
-    uint64_t *sub_consumed = nullptr;
-    doca_mmap *sub_mmap = nullptr;
-    std::atomic<uint64_t> sub_tail{0};
-
-    char *ring_mem = nullptr;
-    ring_slot *ring = nullptr;
-    uint64_t *ring_consumed = nullptr;
-    doca_mmap *ring_mmap = nullptr;
-    unsigned ring_len;
-    std::atomic<uint64_t> ring_head{0};
-
-    uint64_t arg_dev = 0;
-    uint64_t stop_dev = 0;
-    uint64_t wrid_dev = 0;
-    uint64_t rwrid_dev = 0;
-    std::atomic<uint64_t> posted{0};
-    std::atomic<uint64_t> completed{0};
 };
 
 } // namespace buddy::rdma

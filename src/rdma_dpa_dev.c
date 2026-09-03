@@ -244,7 +244,9 @@ static void drain_completions(struct fabric_arg *a)
  * Holding an execution unit is the intent: this is buddy's poll loop, moved off the Arm. */
 __dpa_global__ void fabric_kernel(uint64_t arg_addr)
 {
-	struct fabric_arg *a = (struct fabric_arg *)arg_addr;
+	/* One launch carries every lane: an infinite kernel never returns, so a second launch on the
+	 * same context would sit behind the first and never start. Each thread takes its own lane. */
+	struct fabric_arg *a = (struct fabric_arg *)arg_addr + doca_dpa_dev_thread_rank();
 	volatile uint64_t *stop;
 
 	if (a->magic != ARG_MAGIC) return;
