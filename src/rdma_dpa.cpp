@@ -76,6 +76,10 @@ static inline void inv_line(const void *p)
  * DPA never sees a half-written descriptor. */
 static inline void flush_line(const void *p)
 {
+	/* The barrier before the clean is load-bearing: a cache maintenance op is not ordered against
+	 * prior stores on its own, so without it the line can be cleaned before the slot's fields have
+	 * landed and the DPA reads a published seq against a stale payload. */
+	asm volatile("dsb sy" ::: "memory");
 	asm volatile("dc cvac, %0" ::"r"(p) : "memory");
 	asm volatile("dsb sy" ::: "memory");
 }
@@ -137,6 +141,12 @@ static unsigned dpa_ring_slots()
 	return n;
 }
 
+/* One completion per posted send and per posted receive. */
+static unsigned cq_size()
+{
+	return 2 * buddy::queue_depth() + 64;
+}
+
 static const uint32_t kPerms = DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_RDMA_READ |
 			       DOCA_ACCESS_FLAG_RDMA_WRITE;
 
@@ -145,6 +155,11 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	  mem_len(mem_len), ring_len(dpa_ring_slots())
 {
 	if (num_connections > kMaxConns) FAIL("dpa fabric supports at most " << kMaxConns << " peers");
+	/* The kernel stops draining the completion queue once this ring is full, so a ring smaller
+	 * than the queue turns back-pressure into a CQ overrun and a dead connection. */
+	if (ring_len < cq_size())
+		FAIL("BUDDY_DPA_RING must be at least " << cq_size() << " for queue depth "
+		     << buddy::queue_depth() << ", got " << ring_len);
 	dev = open_dev(dpa_ibdev());
 	pf_dev = open_dev(dpa_pf_ibdev());
 
@@ -218,7 +233,10 @@ void DpaFabric::init_lane(Lane &l)
 	CHECK_DOCA(doca_dpa_thread_set_func_arg(l.thread, &fabric_kernel, 0));
 	CHECK_DOCA(doca_dpa_thread_start(l.thread));
 
-	CHECK_DOCA(doca_dpa_completion_create(dpa, 4096, &l.comp));
+	/* Every posted send and receive can produce one completion, so the queue has to hold both
+	 * queues at once. Measured: too small and the device reports CQ overrun (mlx5 CQ error
+	 * syndrome 0x1), which kills the connection and surfaces only as a RECV_ERR. */
+	CHECK_DOCA(doca_dpa_completion_create(dpa, cq_size(), &l.comp));
 	CHECK_DOCA(doca_dpa_completion_set_thread(l.comp, l.thread));
 	CHECK_DOCA(doca_dpa_completion_start(l.comp));
 
@@ -484,13 +502,44 @@ bool DpaFabric::poll(unsigned lane, completion *c)
 		c->op = (op_type)s->op;
 		if (l.ring_head.compare_exchange_weak(head, head + 1, std::memory_order_acq_rel,
 						      std::memory_order_relaxed)) {
-			/* Tell the kernel this slot is free again, or it wraps and overwrites. */
-			__atomic_store_n(l.ring_consumed, head + 1, __ATOMIC_RELEASE);
+			/* An error completion has already put the connection into an error state, so
+			 * every later operation would stall with no further sign of why. */
+			if (c->op == OP_ERR)
+				FAIL("dpa fabric: rdma error completion type=0x" << std::hex << c->len
+				     << std::dec << " wr_id=" << c->wr_id << " conn=" << c->conn);
+			/* Tell the kernel this slot is free again, or it wraps and overwrites. Never
+			 * let it go backwards: two threads completing out of order would otherwise
+			 * publish a stale lower value, and the kernel reads that as a full ring and
+			 * stops draining the completion queue. */
+			uint64_t seen = __atomic_load_n(l.ring_consumed, __ATOMIC_RELAXED);
+			while (seen < head + 1 &&
+			       !__atomic_compare_exchange_n(l.ring_consumed, &seen, head + 1, true,
+							    __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+				;
 			flush_line(l.ring_consumed);
 			l.completed.fetch_add(1, std::memory_order_relaxed);
 			return true;
 		}
 	}
+}
+
+DpaFabric::state DpaFabric::snapshot(unsigned lane)
+{
+	Lane &l = lane_of(lane);
+	auto lane_index = [&](unsigned n) { return n < num_lanes ? n : 0u; };
+	const uint64_t head = l.ring_head.load(std::memory_order_relaxed);
+	ring_slot *s = &l.ring[head % ring_len];
+	inv_line(l.sub_consumed);
+	inv_line(s);
+	fabric_arg a = {};
+	doca_dpa_d2h_memcpy(dpa, &a, args_dev + sizeof(fabric_arg) * lane_index(lane), sizeof(a));
+	return {l.sub_tail.load(std::memory_order_relaxed),
+		__atomic_load_n(l.sub_consumed, __ATOMIC_ACQUIRE), head,
+		__atomic_load_n(&s->seq, __ATOMIC_ACQUIRE),
+		l.posted.load(std::memory_order_relaxed),
+		l.completed.load(std::memory_order_relaxed),
+		a.sub_head, a.tail, a.errors, a.last_err, a.rwrid_head, a.rwrid_tail,
+		a.wrid_head[0], a.wrid_tail[0]};
 }
 
 bool DpaFabric::wait_idle(unsigned lane, double timeout_s)

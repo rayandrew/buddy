@@ -19,7 +19,7 @@
 /* Longest run of operations posted without ringing the doorbell. */
 #define FLUSH_EVERY 8
 
-enum { OP_SEND, OP_RECV, OP_READ, OP_WRITE };
+enum { OP_SEND, OP_RECV, OP_READ, OP_WRITE, OP_ERR };
 
 struct submit_slot {
 	uint64_t wr_id;
@@ -155,7 +155,8 @@ static void drain_submits(struct fabric_arg *a)
 	/* Measured: receives posted here only become effective once something rings the queue, and
 	 * post_receive takes no submit flags. A side that only receives issues no flushed operation at
 	 * all, so its re-posts never arm and it stops after its initial batch. receive_ack is not the
-	 * ring (it makes it strictly worse), so push the descriptors out explicitly. */
+	 * ring: adding it makes the stall far earlier (4 messages instead of 220), so push the
+	 * descriptors out explicitly instead. */
 	if (recvs_posted) __dpa_thread_memory_writeback();
 	if (posted) {
 		*consumed = a->sub_head;
@@ -219,21 +220,31 @@ static void drain_completions(struct fabric_arg *a)
 			publish(ring, a, wr_id, imm, 0, c, OP_SEND);
 			break;
 		}
-		default:
-			/* SEND_ERR / RECV_ERR. Counting them is the only way they are visible: an
-			 * error completion carries no error text to the Arm. */
+		default: {
+			/* SEND_ERR / RECV_ERR. An error completion puts the connection into an error
+			 * state, so every later operation stalls; publish it so the Arm aborts with the
+			 * type instead of polling an already dead queue pair forever. */
+			uint64_t bad = 0;
 			a->errors++;
 			a->last_err = t;
 			if (t == DOCA_DPA_DEV_COMP_RECV_ERR) {
-				if (a->rwrid_head != a->rwrid_tail) a->rwrid_head++;
+				if (a->rwrid_head != a->rwrid_tail)
+					bad = ((uint64_t *)a->rwrid_addr)[a->rwrid_head++ % WRID_FIFO];
 			} else if (a->wrid_head[c] != a->wrid_tail[c]) {
-				a->wrid_head[c]++;
+				bad = ((uint64_t *)a->wrid_addr)
+					[c * WRID_FIFO + (a->wrid_head[c]++ % WRID_FIFO)];
 			}
+			publish(ring, a, bad, 0, t, c, OP_ERR);
 			break;
+		}
 		}
 		acked++;
 	}
 	if (acked) doca_dpa_dev_completion_ack(a->comp, acked);
+	/* Re-arm after acking. Without this the context stops being notified of new elements, so
+	 * completions silently stop arriving once the initial arming is used up: both peers then sit
+	 * with sends that never complete and receives that never fire. */
+	doca_dpa_dev_completion_request_notification(a->comp);
 }
 
 /* Launched once by the host with doca_dpa_kernel_launch_update_set and runs until the Arm sets the
@@ -253,6 +264,7 @@ __dpa_global__ void fabric_kernel(uint64_t arg_addr)
 
 	stop = (volatile uint64_t *)a->stop_addr;
 	if (a->ctx) doca_dpa_dev_device_set(a->ctx);
+	doca_dpa_dev_completion_request_notification(a->comp);
 
 	while (!*stop) {
 		drain_submits(a);

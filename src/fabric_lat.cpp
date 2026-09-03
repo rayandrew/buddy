@@ -1,0 +1,253 @@
+/* Per-operation cost of whichever D2D fabric this tree was configured with.
+ *
+ * Built in both fabric trees, so DocaRdma and DpaFabric are measured by identical code.
+ *
+ *   local   submit -> our own send completion. No peer involved, so this is what the fabric costs
+ *           to get an operation onto the wire and report it back.
+ *   rtt     submit -> the peer's reply arrives. Adds the peer's receive and send.
+ *
+ * LAT_WINDOW sets how many messages are in flight per thread and LAT_THREADS how many threads share
+ * the fabric, so the buddy configurations that differ most between the legs (depth 2 against depth
+ * 128, one routing thread against two) can be reproduced without the proxy protocol on top.
+ *
+ *   node A: fabric-lat --server        node B: fabric-lat --peer <A-ip>
+ */
+#include <algorithm>
+#include <arpa/inet.h>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <thread>
+#include <unistd.h>
+#include <vector>
+
+#ifdef FABRIC_DPA
+#include "rdma_dpa.h"
+namespace buddy::rdma { using Fabric = DpaFabric; }
+static const char *kFabric = "dpa";
+#else
+#include "rdma_doca.h"
+namespace buddy::rdma { using Fabric = DocaRdma; }
+static const char *kFabric = "doca";
+#endif
+
+#define PORT 18519
+#define SLOT 4096
+
+static int peer_sock(const char *peer)
+{
+	struct sockaddr_in a = {};
+	a.sin_family = AF_INET;
+	a.sin_port = htons(PORT);
+	if (!peer) {
+		int l = socket(AF_INET, SOCK_STREAM, 0), on = 1;
+		setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+		a.sin_addr.s_addr = INADDR_ANY;
+		if (bind(l, (struct sockaddr *)&a, sizeof(a)) || listen(l, 1)) return -1;
+		int s = accept(l, NULL, NULL);
+		close(l);
+		return s;
+	}
+	inet_pton(AF_INET, peer, &a.sin_addr);
+	for (int i = 0; i < 100; i++) {
+		int s = socket(AF_INET, SOCK_STREAM, 0);
+		if (!connect(s, (struct sockaddr *)&a, sizeof(a))) return s;
+		close(s);
+		usleep(100000);
+	}
+	return -1;
+}
+
+static double now_us()
+{
+	using clk = std::chrono::steady_clock;
+	return std::chrono::duration<double, std::micro>(clk::now().time_since_epoch()).count();
+}
+
+static int env_int(const char *k, int dflt)
+{
+	const char *e = getenv(k);
+	return e && *e ? atoi(e) : dflt;
+}
+
+int main(int argc, char **argv)
+{
+	const char *peer = NULL;
+	bool server = false;
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--server")) server = true;
+		else if (!strcmp(argv[i], "--peer") && i + 1 < argc) peer = argv[++i];
+	}
+	if (!server && !peer) { printf("usage: --server | --peer <ip>\n"); return 1; }
+
+	const int rounds = env_int("LAT_ROUNDS", 2000);
+	const int window = env_int("LAT_WINDOW", 1);
+	const int nthr = env_int("LAT_THREADS", 1);
+	const size_t msg = (size_t)env_int("LAT_SIZE", 4080);
+
+	/* One receive slot per in-flight message per thread, plus the same again for sends, so no two
+	 * messages ever share a buffer. */
+	const int nslot = window * nthr;
+	const size_t len = (size_t)SLOT * nslot * 2;
+	char *mem = (char *)aligned_alloc(64, len);
+	memset(mem, 0, len);
+
+	buddy::rdma::Fabric f(1, mem, len, 1);
+	int sock = peer_sock(server ? NULL : peer);
+	if (sock < 0) { printf("socket failed\n"); return 1; }
+	f.connect(0, sock, server);
+	f.wait_connected();
+
+	const size_t recv_off = 0, send_off = (size_t)SLOT * nslot;
+	for (int i = 0; i < nslot; i++) f.post_recv(0, recv_off + (size_t)i * SLOT, SLOT, 1000 + i);
+	{
+		char sync = 1;
+		if (write(sock, &sync, 1) != 1 || read(sock, &sync, 1) != 1) return 1;
+	}
+	memset(mem + send_off, 0xAB, (size_t)SLOT * nslot);
+
+	std::vector<std::thread> threads;
+	std::vector<std::vector<double>> per_thread(nthr);
+	const double t_start = now_us();
+	std::atomic<long> done{0};
+
+	/* No lock here: both fabrics make concurrent poll safe themselves, DocaRdma with a per-lane
+	 * mutex and DpaFabric with a compare-exchange, so wrapping one would serialise the lock-free
+	 * side and measure the wrapper instead of the fabric. */
+	auto drain_one = [&](buddy::rdma::Fabric::completion *c) { return f.poll(0, c); };
+
+	/* A stall shows which side stopped: submits not drained means the kernel is stuck, submits
+	 * drained with nothing published means the operation never came back. Armed on both ends,
+	 * because a client waiting on replies says nothing about why the server stopped sending. */
+	std::atomic<bool> finished{false};
+	std::thread watchdog([&] {
+		long last = -1;
+		for (int quiet = 0; !finished.load(std::memory_order_relaxed);) {
+			usleep(500000);
+			const long d = done.load(std::memory_order_relaxed);
+			if (d != last) { last = d; quiet = 0; continue; }
+			if (++quiet != 10) continue;
+			quiet = 0;
+#ifdef FABRIC_DPA
+			const auto st = f.snapshot(0);
+			fprintf(stderr,
+				"STALL %s done=%ld host[sub_tail=%lu sub_consumed=%lu ring_head=%lu "
+				"head_seq=%lu posted=%lu completed=%lu] "
+				"kernel[sub_head=%lu tail=%lu errors=%lu last_err=%lu "
+				"rwrid=%lu/%lu wrid=%lu/%lu]\n",
+				server ? "server" : "client", d, st.sub_tail, st.sub_consumed,
+				st.ring_head, st.head_seq, st.posted, st.completed,
+				st.k_sub_head, st.k_tail, st.k_errors, st.k_last_err,
+				st.k_rwrid_head, st.k_rwrid_tail, st.k_wrid_head, st.k_wrid_tail);
+#else
+			fprintf(stderr, "STALL %s done=%ld\n", server ? "server" : "client", d);
+#endif
+		}
+	});
+
+	/* The server echoes until the client says it is finished; the client times. Replies arrive in
+	 * order on a reliable connection, so with a window the Nth reply belongs to the Nth send. */
+	if (server) {
+		std::atomic<bool> stop{false};
+		std::thread waiter([&] {
+			char sync;
+			if (read(sock, &sync, 1) == 1) stop.store(true, std::memory_order_relaxed);
+		});
+		for (int t = 0; t < nthr; t++) {
+			threads.emplace_back([&, t] {
+				buddy::rdma::Fabric::completion c;
+				while (!stop.load(std::memory_order_relaxed)) {
+					if (!drain_one(&c)) continue;
+					if (c.op != buddy::rdma::Fabric::OP_RECV) continue;
+					const uint64_t slot = c.wr_id - 1000;
+					f.send_imm(0, 0, 0x1, send_off + slot * SLOT, msg, 500 + slot);
+					f.post_recv(0, recv_off + slot * SLOT, SLOT, 1000 + slot);
+					done.fetch_add(1, std::memory_order_relaxed);
+				}
+			});
+		}
+		for (auto &th : threads) th.join();
+		waiter.join();
+		finished.store(true, std::memory_order_relaxed);
+		watchdog.join();
+		close(sock);
+		free(mem);
+		return 0;
+	}
+
+	/* A slot is issued again only after its reply has returned it to the pool, so a timestamp is
+	 * never overwritten while its message is outstanding. The pool is shared because any thread may
+	 * drain any thread's reply; per-thread pools strand a slot whose reply another thread took. */
+	std::vector<double> issued(nslot, 0.0);
+	std::vector<int> free_slots;
+	std::mutex pool_lock, lat_lock;
+	std::atomic<int> claimed{0};
+	const int total = rounds * nthr;
+	for (int i = 0; i < nslot; i++) free_slots.push_back(i);
+
+	for (int t = 0; t < nthr; t++) {
+		threads.emplace_back([&] {
+			buddy::rdma::Fabric::completion c;
+			std::vector<double> mine;
+			mine.reserve(total / nthr + 1);
+
+			while (done.load(std::memory_order_relaxed) < total) {
+				for (;;) {
+					int slot = -1;
+					{
+						std::lock_guard<std::mutex> g(pool_lock);
+						if (free_slots.empty()) break;
+						if (claimed.fetch_add(1, std::memory_order_relaxed) >= total) {
+							claimed.fetch_sub(1, std::memory_order_relaxed);
+							break;
+						}
+						slot = free_slots.back();
+						free_slots.pop_back();
+					}
+					issued[slot] = now_us();
+					f.send_imm(0, 0, 0x1, send_off + (size_t)slot * SLOT, msg,
+						   500 + slot);
+				}
+				if (!drain_one(&c)) continue;
+				if (c.op != buddy::rdma::Fabric::OP_RECV) continue;
+				const int slot = (int)(c.wr_id - 1000);
+				mine.push_back(now_us() - issued[slot]);
+				f.post_recv(0, recv_off + (size_t)slot * SLOT, SLOT, 1000 + slot);
+				{
+					std::lock_guard<std::mutex> g(pool_lock);
+					free_slots.push_back(slot);
+				}
+				done.fetch_add(1, std::memory_order_relaxed);
+			}
+			std::lock_guard<std::mutex> g(lat_lock);
+			per_thread[0].insert(per_thread[0].end(), mine.begin(), mine.end());
+		});
+	}
+
+
+	for (auto &th : threads) th.join();
+	const double elapsed = now_us() - t_start;
+	finished.store(true, std::memory_order_relaxed);
+	watchdog.join();
+
+	std::vector<double> all;
+	for (auto &v : per_thread) all.insert(all.end(), v.begin() + v.size() / 10, v.end());
+	std::sort(all.begin(), all.end());
+	if (!all.empty())
+		printf("%-4s w=%-4d thr=%-2d n=%-7zu min %8.2f  p50 %8.2f  p99 %8.2f us   %8.0f msg/s\n",
+		       kFabric, window, nthr, all.size(), all.front(), all[all.size() / 2],
+		       all[all.size() * 99 / 100], done.load() * 1e6 / elapsed);
+
+	{
+		char sync = 1;
+		if (write(sock, &sync, 1) != 1) return 1;
+	}
+	close(sock);
+	free(mem);
+	return 0;
+}

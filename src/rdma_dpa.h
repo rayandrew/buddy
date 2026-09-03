@@ -26,7 +26,8 @@ namespace buddy::rdma {
 // proxy thread's operations never queue behind another thread's.
 class DpaFabric {
   public:
-    enum op_type { OP_SEND, OP_RECV, OP_READ, OP_WRITE };
+    // OP_ERR never reaches a caller: poll aborts on it. Mirrored in rdma_dpa_dev.c.
+    enum op_type { OP_SEND, OP_RECV, OP_READ, OP_WRITE, OP_ERR };
     struct completion { uint64_t wr_id; uint32_t imm; uint32_t len; unsigned conn; op_type op; };
 
     // Both mirrored in rdma_dpa_dev.c; the definitions must agree field for field.
@@ -91,6 +92,14 @@ class DpaFabric {
     bool wait_idle(unsigned lane, double timeout_s);
 
     unsigned lanes_count() const { return num_lanes; }
+
+    // Temporary, for diagnosing a stall: where each side of the rings has got to.
+    struct state {
+        uint64_t sub_tail, sub_consumed, ring_head, head_seq, posted, completed;
+        uint64_t k_sub_head, k_tail, k_errors, k_last_err, k_rwrid_head, k_rwrid_tail,
+                 k_wrid_head, k_wrid_tail;
+    };
+    state snapshot(unsigned lane);
 
   private:
     Lane &lane_of(unsigned lane) { return lanes[lane < num_lanes ? lane : 0]; }
