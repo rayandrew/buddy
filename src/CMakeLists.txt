@@ -33,6 +33,7 @@ if(DPA_FABRIC)
 	add_custom_command(OUTPUT ${DPA_ARCHIVE}
 		COMMAND /opt/mellanox/doca/tools/dpacc ${CMAKE_CURRENT_SOURCE_DIR}/rdma_dpa_dev.c
 			${CMAKE_CURRENT_SOURCE_DIR}/dpa_echo_dev.c
+			${CMAKE_CURRENT_SOURCE_DIR}/dpa_d2d_dev.c
 			-o ${DPA_ARCHIVE} -mcpu=nv-dpa-bf3 -hostcc=gcc
 			-hostcc-options=-DFLEXIO_ALLOW_EXPERIMENTAL_API
 			--devicecc-options=-DFLEXIO_DEV_ALLOW_EXPERIMENTAL_API,-O2,-Wall
@@ -40,6 +41,7 @@ if(DPA_FABRIC)
 			-device-libs=-L/opt/mellanox/doca/lib/aarch64-linux-gnu,-ldoca_dpa_dev,-ldoca_dpa_dev_comm
 			-flto -I/opt/mellanox/doca/include
 		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rdma_dpa_dev.c ${CMAKE_CURRENT_SOURCE_DIR}/dpa_echo_dev.c
+			${CMAKE_CURRENT_SOURCE_DIR}/dpa_d2d_dev.c
 		COMMENT "dpacc buddy_dpa_app")
 	add_custom_target(buddy_dpa_kernel DEPENDS ${DPA_ARCHIVE})
 	target_link_directories(buddy_common INTERFACE /opt/mellanox/doca/lib/${CMAKE_LIBRARY_ARCHITECTURE} /opt/mellanox/doca/lib/aarch64-linux-gnu /opt/mellanox/flexio/lib)
@@ -61,6 +63,10 @@ if(DPA_FABRIC)
 	add_executable(dpa-echo ${common_src} dpa_echo.cpp)
 	add_dependencies(dpa-echo buddy_dpa_kernel)
 	target_link_libraries(dpa-echo PRIVATE buddy_common)
+
+	add_executable(dpa-d2d ${common_src} dpa_d2d.cpp dpa_d2d_test.cpp)
+	add_dependencies(dpa-d2d buddy_dpa_kernel)
+	target_link_libraries(dpa-d2d PRIVATE buddy_common)
 endif()
 
 if(DOCA_FABRIC OR DPA_FABRIC)

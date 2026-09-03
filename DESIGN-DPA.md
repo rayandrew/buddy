@@ -90,9 +90,49 @@ records per message a single thread matches the CPU path. The walk is serial ins
 each step depends on the previous `size`, but independent across buffers, so the receive pool is
 split across several threads.
 
-**One API rule.** `doca_dpa_dev_completion_ack(comp, 1)` must be called for each element as it is
-read. Acking a whole drain in one call frees nothing, and traffic stops silently after exactly
-completion-queue-size elements; the stall point tracks the queue size across a 16x range.
+### Rules the event-driven model imposes
+
+Each of these was found by measurement, and each fails silently with no error anywhere.
+
+1. **Ack one element at a time, as it is read.** `doca_dpa_dev_completion_ack(comp, 1)` inside the
+   drain. Acking a whole drain in one call at the end frees nothing: traffic stops after exactly
+   completion-queue-size elements, and the stall point tracks the queue size across a 16x range.
+2. **Bound the drain.** Handling a completion posts another operation whose completion can arrive
+   before the drain ends, so an unbounded loop never empties under load and the handler never
+   reaches `doca_dpa_dev_thread_reschedule`. The thread wakes once and goes silent. Eight
+   completions in one round is what these engines use; the ceiling scales with work per completion,
+   so the echo survives to a window of 1024 and the routing engine does not.
+3. **Keep the argument block small.** A large block makes the h2d and d2h copies unreliable, and
+   counters living past the damage read as zero. The pending FIFO gets its own device allocation.
+4. **Keep the sender's window below the peer's posted receives.** The excess sits in RNR retry
+   forever with `rnr_retry_count` at 7. buddy's credit protocol already enforces this, which makes
+   that protocol load-bearing for liveness once it moves onto the device, not just for buffer reuse.
+
+### The routing engine, measured
+
+`src/dpa_d2d.cpp` and `src/dpa_d2d_dev.c`, one peer, 4 KB buffers, 32 records each:
+
+| engines | window | msg/s | records/s | errors |
+|---|---|---|---|---|
+| 1 | 16 (256 buffers) | 183k | 5.88M | 0 |
+| 1 | 16 (128 buffers) | 90k | 2.89M | 0 |
+| 2 | 16 (128 buffers) | 90k | 2.89M | 1 |
+| 4 | 16 (128 buffers) | 183k | 5.86M | 2 |
+| 8 | 16 (128 buffers) | 386k | 12.36M | 4 |
+
+Engines are the scaling axis, not depth: 2 to 4 to 8 doubles each time. Errors track the engine
+count at about one each, which looks like a race at start rather than a fault under load.
+
+Against ~150k for the DOCA CPU path at buddy's two threads, and 180k for the first DPA fabric which
+also stalled and returned wrong answers. The engine does strictly more work than either, since it
+routes on the device.
+
+Zero-copy forwarding works: a run of consecutive records sharing a destination is posted as one send
+straight out of the received buffer, and the buffer is re-posted once its forwards complete.
+
+**Open.** Engine counts above one produce occasional `RECV_ERR`, and the routing engine stalls above
+a window of about 16 where the echo reaches 1024. Both need to be understood before this replaces
+the proxy's data path.
 
 ### Routing on the device
 

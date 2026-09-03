@@ -7,6 +7,7 @@
  *
  *   node A: dpa-echo --server        node B: dpa-echo --peer <A-ip>
  */
+#include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
 #include <cstdio>
@@ -50,6 +51,10 @@ struct echo_arg {
 	uint32_t next_recv;
 	uint32_t next_send;
 
+	uint64_t target;
+	uint64_t msg_len;
+	uint64_t burst;
+	uint64_t in_flight;
 	uint32_t parse;
 	uint64_t records;
 	uint64_t bad_records;
@@ -206,9 +211,9 @@ int main(int argc, char **argv)
 	CHECK_DOCA(doca_rdma_set_gid_index(rdma, (uint32_t)env_int("BUDDY_GID_INDEX", 0)));
 	CHECK_DOCA(doca_rdma_set_max_num_connections(rdma, 1));
 	CHECK_DOCA(doca_rdma_set_rnr_retry_count(rdma, 7));
-	CHECK_DOCA(doca_rdma_set_send_queue_size(rdma, 1024));
+	CHECK_DOCA(doca_rdma_set_send_queue_size(rdma, (uint32_t)env_int("ECHO_SQ", 1024)));
 	{
-		const doca_error_t rq = doca_rdma_set_recv_queue_size(rdma, 1024);
+		const doca_error_t rq = doca_rdma_set_recv_queue_size(rdma, (uint32_t)env_int("ECHO_RQ", 1024));
 		if (rq != DOCA_SUCCESS && rq != DOCA_ERROR_NOT_SUPPORTED)
 			FAIL("doca " << doca_error_get_descr(rq));
 		const doca_error_t bl = doca_rdma_task_receive_set_dst_buf_list_len(rdma, 1);
@@ -260,6 +265,7 @@ int main(int argc, char **argv)
 	a.slot_size = slot;
 	a.nslot = nslot;
 	a.parse = (uint32_t)(records > 0);
+	a.burst = (uint64_t)env_int("ECHO_BURST", 16);
 	CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, arg_dev, &a, sizeof(a)));
 
 	CHECK_DOCA(doca_dpa_thread_run(thread));
@@ -273,8 +279,15 @@ int main(int argc, char **argv)
 		buddy::full_write(sock, &sync, 1);
 		buddy::full_read(sock, &sync, 1);
 	}
-	if (!server) CHECK_DOCA(doca_dpa_rpc(dpa, &echo_start, &rc, arg_dev, (uint64_t)window,
-					     (uint64_t)slot));
+	/* Post the window in chunks. One RPC posting the whole window dies above about 64 operations,
+	 * so this separates the size of a single burst from the steady depth they add up to. */
+	if (!server) {
+		const unsigned chunk = (unsigned)env_int("ECHO_CHUNK", 16);
+		for (unsigned done = 0; done < window; done += chunk) {
+			const uint64_t n = std::min<unsigned>(chunk, window - done);
+			CHECK_DOCA(doca_dpa_rpc(dpa, &echo_start, &rc, arg_dev, n, (uint64_t)slot));
+		}
+	}
 
 	/* From here the Arm only samples a counter. It issues no work and polls no ring. Sampling once
 	 * a second separates a steady rate from a burst that stalls, which one interval cannot. */

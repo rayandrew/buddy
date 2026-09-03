@@ -9,6 +9,9 @@
 #include <doca_dpa_dev_buf.h>
 #include <doca_dpa_dev_rdma.h>
 
+/* Completions handled per drain pass before the handler must return to the scheduler. */
+#define ECHO_DRAIN_MAX 8
+
 struct echo_arg {
 	doca_dpa_dev_t ctx;
 	doca_dpa_dev_completion_t comp;
@@ -26,6 +29,10 @@ struct echo_arg {
 	uint32_t next_recv;     /* receive buffer to re-post into */
 	uint32_t next_send;
 
+	uint64_t target;        /* messages to keep in flight; reached by ramping from the handler */
+	uint64_t msg_len;
+	uint64_t burst;         /* how many the start RPC may post itself */
+	uint64_t in_flight;
 	uint32_t parse;         /* walk each message's request records before echoing */
 	uint64_t records;       /* records seen, so the host can price the walk */
 	uint64_t bad_records;
@@ -69,12 +76,16 @@ __dpa_rpc__ uint64_t echo_arm(uint64_t arg_addr)
 	return 0;
 }
 
-/* Starts the traffic: one send per window slot. */
+/* Starts the traffic: one send per window slot. Each receive posts exactly one send, so this burst
+ * also sets the steady depth. */
 __dpa_rpc__ uint64_t echo_start(uint64_t arg_addr, uint64_t window, uint64_t len)
 {
 	struct echo_arg *a = (struct echo_arg *)arg_addr;
+	uint64_t i;
+
 	if (a->ctx) doca_dpa_dev_device_set(a->ctx);
-	for (uint64_t i = 0; i < window; i++) {
+	a->msg_len = len;
+	for (i = 0; i < window; i++) {
 		const uint32_t s = a->next_send++ % a->nslot;
 		doca_dpa_dev_rdma_post_send_imm(a->rdma, 0, a->mmap,
 						a->send_base + (uint64_t)s * a->slot_size, len,
@@ -94,11 +105,15 @@ __dpa_global__ void echo_handler(uint64_t arg_addr)
 
 	/* Arm, then drain again before giving up the thread. A completion that arrives between the
 	 * last empty drain and the arming would otherwise never be signalled, and the thread sleeps
-	 * for good: measured as the echo stopping dead after a few thousand messages. */
-	for (;;) {
+	 * for good: measured as the echo stopping dead after a few thousand messages.
+	 *
+	 * The drain is bounded because handling a completion posts another operation, whose completion
+	 * can arrive before the drain ends. Unbounded, the handler never returns to the scheduler once
+	 * the window is deep enough: measured as the echo dying at a window of 128. */
+	for (uint32_t round = 0; round < 1; round++) {
 		uint32_t acked = 0;
 
-		while (doca_dpa_dev_get_completion(a->comp, &e)) {
+		while (acked < ECHO_DRAIN_MAX && doca_dpa_dev_get_completion(a->comp, &e)) {
 			const doca_dpa_dev_completion_type_t t = doca_dpa_dev_get_completion_type(e);
 			/* Ack each element as it is read, which is what the shipped samples do.
 			 * Measured: acking the whole drain in one call at the end frees nothing, and
