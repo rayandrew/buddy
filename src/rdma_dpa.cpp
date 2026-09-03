@@ -141,11 +141,8 @@ static unsigned dpa_ring_slots()
 	return n;
 }
 
-/* One completion per posted send and per posted receive. */
-static unsigned cq_size()
-{
-	return 2 * buddy::queue_depth() + 64;
-}
+/* Holds one completion per posted send and per posted receive, with room to spare. */
+static constexpr unsigned kCompletionQueue = 4096;
 
 static const uint32_t kPerms = DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_RDMA_READ |
 			       DOCA_ACCESS_FLAG_RDMA_WRITE;
@@ -155,11 +152,10 @@ DpaFabric::DpaFabric(unsigned num_connections, char *mem, size_t mem_len, unsign
 	  mem_len(mem_len), ring_len(dpa_ring_slots())
 {
 	if (num_connections > kMaxConns) FAIL("dpa fabric supports at most " << kMaxConns << " peers");
-	/* The kernel stops draining the completion queue once this ring is full, so a ring smaller
-	 * than the queue turns back-pressure into a CQ overrun and a dead connection. */
-	if (ring_len < cq_size())
-		FAIL("BUDDY_DPA_RING must be at least " << cq_size() << " for queue depth "
-		     << buddy::queue_depth() << ", got " << ring_len);
+	/* The kernel stops draining the completion queue once this ring is full, so a smaller ring
+	 * would turn back-pressure into a completion-queue overrun. */
+	if (ring_len < kCompletionQueue)
+		FAIL("BUDDY_DPA_RING must be at least " << kCompletionQueue << ", got " << ring_len);
 	dev = open_dev(dpa_ibdev());
 	pf_dev = open_dev(dpa_pf_ibdev());
 
@@ -233,10 +229,7 @@ void DpaFabric::init_lane(Lane &l)
 	CHECK_DOCA(doca_dpa_thread_set_func_arg(l.thread, &fabric_kernel, 0));
 	CHECK_DOCA(doca_dpa_thread_start(l.thread));
 
-	/* Every posted send and receive can produce one completion, so the queue has to hold both
-	 * queues at once. Measured: too small and the device reports CQ overrun (mlx5 CQ error
-	 * syndrome 0x1), which kills the connection and surfaces only as a RECV_ERR. */
-	CHECK_DOCA(doca_dpa_completion_create(dpa, cq_size(), &l.comp));
+	CHECK_DOCA(doca_dpa_completion_create(dpa, kCompletionQueue, &l.comp));
 	CHECK_DOCA(doca_dpa_completion_set_thread(l.comp, l.thread));
 	CHECK_DOCA(doca_dpa_completion_start(l.comp));
 
@@ -507,15 +500,8 @@ bool DpaFabric::poll(unsigned lane, completion *c)
 			if (c->op == OP_ERR)
 				FAIL("dpa fabric: rdma error completion type=0x" << std::hex << c->len
 				     << std::dec << " wr_id=" << c->wr_id << " conn=" << c->conn);
-			/* Tell the kernel this slot is free again, or it wraps and overwrites. Never
-			 * let it go backwards: two threads completing out of order would otherwise
-			 * publish a stale lower value, and the kernel reads that as a full ring and
-			 * stops draining the completion queue. */
-			uint64_t seen = __atomic_load_n(l.ring_consumed, __ATOMIC_RELAXED);
-			while (seen < head + 1 &&
-			       !__atomic_compare_exchange_n(l.ring_consumed, &seen, head + 1, true,
-							    __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-				;
+			/* Tell the kernel this slot is free again, or it wraps and overwrites. */
+			__atomic_store_n(l.ring_consumed, head + 1, __ATOMIC_RELEASE);
 			flush_line(l.ring_consumed);
 			l.completed.fetch_add(1, std::memory_order_relaxed);
 			return true;

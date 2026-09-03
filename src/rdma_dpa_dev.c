@@ -202,6 +202,11 @@ static void drain_completions(struct fabric_arg *a)
 		const uint32_t imm = doca_dpa_dev_get_completion_immediate(e);
 		const uint32_t c = 0;
 
+		/* Ack each element as it is read. Acking the whole drain in one call at the end frees
+		 * nothing: measured on the same API in dpa_echo_dev.c, where the queue filled exactly
+		 * once and traffic stopped at completion-queue-size elements, across a 16x range. */
+		doca_dpa_dev_completion_ack(a->comp, 1);
+
 		switch (t) {
 		case DOCA_DPA_DEV_COMP_RECV_RDMA_WRITE_IMM:
 		case DOCA_DPA_DEV_COMP_RECV_SEND:
@@ -240,11 +245,7 @@ static void drain_completions(struct fabric_arg *a)
 		}
 		acked++;
 	}
-	if (acked) doca_dpa_dev_completion_ack(a->comp, acked);
-	/* Re-arm after acking. Without this the context stops being notified of new elements, so
-	 * completions silently stop arriving once the initial arming is used up: both peers then sit
-	 * with sends that never complete and receives that never fire. */
-	doca_dpa_dev_completion_request_notification(a->comp);
+	if (acked) doca_dpa_dev_completion_request_notification(a->comp);
 }
 
 /* Launched once by the host with doca_dpa_kernel_launch_update_set and runs until the Arm sets the
