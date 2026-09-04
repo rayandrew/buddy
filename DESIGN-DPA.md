@@ -321,17 +321,26 @@ The host appends every request to one send buffer whatever its destination, so t
 to sort and re-pack. Mean run of consecutive records sharing a destination, one proxy thread, 4
 ranks:
 
-| App | Records | Runs | Mean run |
+Records per run is the wrong measure. A run is one message, so what decides a device-side router is
+**bytes** per run against the buffer size. Measured, 4 ranks, one proxy thread:
+
+| App | Mean run | Bytes/run | Sends per 32KB buffer |
 |---|---|---|---|
-| histo | 20000000 | 15003217 | 1.333 |
-| transpose | 3199581 | 2398247 | 1.334 |
-| sssp | 6692521 | 5022729 | 1.332 |
-| triangle | 12260539 | 1199547 | 10.221 |
+| histo | 1.333 | 21.3 | 1538 |
+| transpose | 1.334 | 26.7 | 1229 |
+| sssp | 1.332 | 32.0 | 1025 |
+| ig | 2.664 | 85.2 | 384 |
+| triangle | 8.473 | 198.8 | 165 |
 
 histo, transpose and sssp all pick destinations uniformly at random (`pe = index % PROCS` over a
 random index), and 1/(1 - 1/4) = 1.333 predicts the measurement exactly. triangle's access is
-structured and runs ten times longer, but ten 16-byte records is 160 bytes, so it still needs
-re-packing.
+structured and its runs are eight times longer, but 198 bytes is still nothing against a 32 KB
+buffer. Every app needs re-packing, and the friendliest of them would still cost 165 sends per
+buffer where forwarding whole costs one.
+
+NIC scatter-gather does not rescue this either. `max_sge` is 30 on this part, so one gathered send
+carries at most 30 runs: 639 bytes for histo. That trades the copy for messages fifty times smaller
+than the ones the proxy sends today, which gives up the aggregation the proxy exists to provide.
 
 A router that sends one message per run would post roughly one send per 1.3 records. That is far
 worse than the Arm, so run forwarding is not an option and per-destination aggregation on the device
