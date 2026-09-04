@@ -11,6 +11,7 @@
 #include <doca_rdma.h>
 
 #include "dpa_d2d.h"
+#include "dpa_hostleg.h"
 #include "sockets.h"
 #include "util.h"
 
@@ -220,6 +221,14 @@ void DpaD2D::wait_connected(double timeout_s)
 	}
 }
 
+bool DpaD2D::host_leg(uint16_t port, double timeout_s)
+{
+	hostleg = new HostLeg(dpa, dev);
+	hostleg->attach(engines[0].comp);
+	hostleg->listen(port);
+	return hostleg->accept_one(timeout_s);
+}
+
 void DpaD2D::route_to_peer(int rank)
 {
 	if (rank < 0 || (unsigned)rank >= kMaxRanks) FAIL("rank out of range: " << rank);
@@ -243,7 +252,9 @@ void DpaD2D::start()
 		a.ctx = dpa_handle;
 		a.comp = comp_handle;
 		CHECK_DOCA(doca_mmap_dev_get_dpa_handle(mmap, dev, (doca_dpa_dev_mmap_t *)&a.mmap));
-		a.rdma[0] = e.rdma_handle;
+		/* The host leg replaces engine 0's receive side: the kernel posts and forwards on
+		 * rdma[0], so pointing it at the host queue pair is the whole change. */
+		a.rdma[0] = (hostleg && i == 0) ? hostleg->dpa_handle() : e.rdma_handle;
 		a.num_peers = 1;
 		a.rx_base = e.rx_base;
 		a.tx_base = e.tx_base;
@@ -320,6 +331,7 @@ DpaD2D::stats DpaD2D::sample() const
 
 DpaD2D::~DpaD2D()
 {
+	delete hostleg;
 	for (unsigned i = 0; i < num_engines; i++) {
 		Engine &e = engines[i];
 		if (e.ctx) doca_ctx_stop(e.ctx);
@@ -328,6 +340,14 @@ DpaD2D::~DpaD2D()
 		if (e.thread) doca_dpa_thread_destroy(e.thread);
 	}
 	if (mmap) doca_mmap_destroy(mmap);
+	/* Before the process is destroyed, or the device heap is left allocated and the next run
+	 * starts short of memory. */
+	if (dpa) {
+		if (rxfifo_dev) doca_dpa_mem_free(dpa, rxfifo_dev);
+		if (pending_dev) doca_dpa_mem_free(dpa, pending_dev);
+		if (args_dev) doca_dpa_mem_free(dpa, args_dev);
+		if (pool_dev) doca_dpa_mem_free(dpa, pool_dev);
+	}
 	if (dpa && dpa != pf_dpa) doca_dpa_destroy(dpa);
 	if (pf_dpa) doca_dpa_destroy(pf_dpa);
 	if (pf_dev && pf_dev != dev) doca_dev_close(pf_dev);

@@ -13,6 +13,8 @@ struct doca_dpa_thread;
 
 namespace buddy::rdma {
 
+class HostLeg;
+
 // DPA-native D2D engine: the device receives, routes and forwards, and the Arm is not in the data
 // path. Buffers are DPA memory registered for RDMA, so the kernel reads them with a plain load and
 // a forward is posted straight out of the buffer a message arrived in. See DESIGN-DPA.md.
@@ -36,6 +38,11 @@ class DpaD2D {
     // Both ends must call this for the peer in the same order, which is what pairs the engines.
     void connect(int sock, bool is_server);
     void wait_connected(double timeout_s = 60.0);
+
+    // Takes engine 0's receive side from a peer DPU to an ordinary ibverbs host, so a message the
+    // host sends is delivered into the DPA pool and walked by the routing kernel. Call instead of
+    // connect(), and before start(). Returns false if no host connected within @p timeout_s.
+    bool host_leg(uint16_t port, double timeout_s = 60.0);
 
     // Ranks default to local; anything left local is counted and dropped rather than forwarded.
     void route_to_peer(int rank);
@@ -71,6 +78,7 @@ class DpaD2D {
     uint64_t rxfifo_dev = 0;    // per-engine record of which buffer each posted receive used
     uint64_t args_dev = 0;
     Engine *engines = nullptr;
+    HostLeg *hostleg = nullptr;
     uint8_t route[kMaxRanks];
     size_t ack_len = 0;
 };

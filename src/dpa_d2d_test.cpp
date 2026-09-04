@@ -55,12 +55,16 @@ static int env_int(const char *k, int d)
 int main(int argc, char **argv)
 {
 	const char *peer = NULL;
-	bool server = false;
+	bool server = false, hostleg = false;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--server")) server = true;
 		else if (!strcmp(argv[i], "--peer") && i + 1 < argc) peer = argv[++i];
+		else if (!strcmp(argv[i], "--hostleg")) hostleg = true;
 	}
-	if (!server && !peer) { printf("usage: --server | --peer <ip>\n"); return 1; }
+	if (!server && !peer && !hostleg) {
+		printf("usage: --server | --peer <ip> | --hostleg\n");
+		return 1;
+	}
 
 	const unsigned engines = (unsigned)env_int("D2D_ENGINES", 1);
 	const unsigned bufs = (unsigned)env_int("D2D_BUFS", 32);
@@ -70,9 +74,36 @@ int main(int argc, char **argv)
 	const int seconds = env_int("D2D_SECONDS", 5);
 
 	buddy::rdma::DpaD2D d2d(engines, bufs, size);
-	d2d.set_ack((size_t)env_int("D2D_ACK", 64));
+	/* The host posts no receives of its own, so an ack toward it would sit in RNR retry. */
+	d2d.set_ack(hostleg ? 0 : (size_t)env_int("D2D_ACK", 64));
 	if (env_int("D2D_FORWARD", 0))
 		for (int r = 0; r < (int)buddy::rdma::DpaD2D::kMaxRanks; r++) d2d.route_to_peer(r);
+
+	if (hostleg) {
+		const uint16_t port = (uint16_t)env_int("D2D_HOSTLEG_PORT", 18525);
+		printf("dpa-d2d hostleg: listening on port %u\n", port);
+		fflush(stdout);
+		if (!d2d.host_leg(port, env_int("D2D_HOSTLEG_TIMEOUT", 60)))
+			FAIL("no host connected");
+		printf("RESULT: host connected to a DPA-datapath queue pair\n");
+		fflush(stdout);
+		d2d.start();
+
+		auto prev0 = d2d.sample();
+		for (int i = 0; i < seconds; i++) {
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+			const auto s = d2d.sample();
+			printf("dpa-d2d hostleg t=%2ds  rx %lu/s  rec %lu/s  total rx=%lu records=%lu local=%lu bad=%lu errors=%lu\n",
+			       i + 1, s.rx_msgs - prev0.rx_msgs, s.records - prev0.records, s.rx_msgs,
+			       s.records, s.local, s.bad_records, s.errors);
+			fflush(stdout);
+			prev0 = s;
+		}
+		const auto f = d2d.sample();
+		printf("RESULT: the DPA routing kernel saw %lu host message(s), %lu record(s)\n",
+		       f.rx_msgs, f.records);
+		return f.rx_msgs ? 0 : 4;
+	}
 
 	int sock = peer_sock(server ? NULL : peer);
 	if (sock < 0) FAIL("socket failed");
