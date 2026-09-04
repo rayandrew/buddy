@@ -827,6 +827,8 @@ void Proxy::print_counters()
     in_total.count_remote += in_counters[tid].count_remote;
     in_total.bytes_local += in_counters[tid].bytes_local;
     in_total.bytes_remote += in_counters[tid].bytes_remote;
+    in_total.records += in_counters[tid].records;
+    in_total.runs += in_counters[tid].runs;
 
     // Per thread, not just the total: an idle lane is pure polling overhead, and the sum hides it.
     std::cout << "lane\t" << tid << "\tin_remote\t" << in_counters[tid].count_remote
@@ -849,6 +851,13 @@ void Proxy::print_counters()
     std::cout << "count_out_local\t" << out_total.count_local << std::endl;
     std::cout << "count_out_remote\t" << out_total.count_remote << std::endl;
     std::cout << "------------------" << std::endl;
+
+    std::cout << "--- destination runs ---" << std::endl;
+    std::cout << "records\t" << in_total.records << std::endl;
+    std::cout << "runs\t" << in_total.runs << std::endl;
+    if (in_total.runs)
+      std::cout << "mean_run_len\t" << (double)in_total.records / in_total.runs << std::endl;
+    std::cout << "------------------------" << std::endl;
 
     std::cout << "--- network bytes ---" << std::endl;
     std::cout << "bytes_in_local\t" << in_total.bytes_local << std::endl;
@@ -962,9 +971,16 @@ bool Proxy::route_reqs(ReqBufRead &reader, std::list<blocked_req>& blocklist)
 
   request_head *head;
   char *data;
+  int32_t run_dst = -1;
   while (reader.peek(&head, &data)) {
     CHECK(head->dst >= 0 && head->dst < world_size);
     route r = routing_table[head->dst];
+
+    in_counters[tid].records++;
+    if (head->dst != run_dst) {
+      in_counters[tid].runs++;
+      run_dst = head->dst;
+    }
 
     auto send_bufs = &d2h_send[tid];
     if (r.remote)

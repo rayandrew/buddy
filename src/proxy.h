@@ -261,6 +261,11 @@ struct rdma_counters {
   uint64_t count_remote = 0;
   uint64_t bytes_local = 0;
   uint64_t bytes_remote = 0;
+  // Records seen, and runs of consecutive records sharing a destination. Their ratio is the mean
+  // run length, which decides whether a device-side router can forward a run as it lies or has to
+  // re-pack per destination the way this proxy does.
+  uint64_t records = 0;
+  uint64_t runs = 0;
 };
 
 struct blocked_req {
