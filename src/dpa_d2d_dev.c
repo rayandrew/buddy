@@ -42,9 +42,15 @@ struct d2d_engine {
 	doca_dpa_dev_completion_t comp;
 	doca_dpa_dev_mmap_t mmap;
 
-	/* One RDMA context per peer, all attached to this engine's completion. */
+	/* Outbound legs, one per peer index the route table can name. */
 	doca_dpa_dev_rdma_t rdma[D2D_MAX_PEERS];
 	uint32_t num_peers;
+
+	/* The one leg this engine receives on. Separate from the outbound legs because a completion
+	 * does not say which queue pair produced it: an engine that received on more than one could
+	 * not tell which buffer had just been filled. One engine per inbound leg instead, each owning
+	 * the queue pairs it posts on, so no two threads ever post to the same one. */
+	doca_dpa_dev_rdma_t rx_rdma;
 
 	uint64_t rx_base;       /* nrx receive buffers owned by this engine */
 	uint64_t buf_size;
@@ -100,6 +106,10 @@ struct d2d_engine {
 	uint32_t defer_tail;
 	uint32_t no_zerocopy;   /* set by the host to force the copy path, for measurement */
 	uint32_t gen_paused;    /* generated sends withheld while routing was short of room */
+	/* Buffers this engine may park at once. Half the pool when it receives from another router,
+	 * which is what stops both of them holding everything and deadlocking; the whole pool bar one
+	 * when it receives from a host, which holds no buffers of its own and can simply be stalled. */
+	uint32_t defer_max;
 	uint64_t errors;
 	uint64_t last_err;
 	uint64_t first_err_rx;  /* rx_msgs when the first error hit */
@@ -120,7 +130,7 @@ struct d2d_engine {
 static void repost(struct d2d_engine *e, uint32_t idx)
 {
 	((uint32_t *)e->rxfifo_addr)[e->rx_tail++ % D2D_PENDING] = idx;
-	doca_dpa_dev_rdma_post_receive(e->rdma[0], e->mmap,
+	doca_dpa_dev_rdma_post_receive(e->rx_rdma, e->mmap,
 				       e->rx_base + (uint64_t)idx * e->buf_size, e->buf_size);
 }
 
@@ -162,7 +172,7 @@ static int route_capacity(const struct d2d_engine *e)
  * this engine is waiting on always complete. */
 static int can_defer(const struct d2d_engine *e)
 {
-	return (deferred(e) + e->held + 1) * 2 <= e->nrx;
+	return deferred(e) + e->held + 1 <= e->defer_max;
 }
 
 /* Every user of a transmit slot marks its pending entry the same way, so the completion path gives
@@ -208,7 +218,7 @@ static void forward(struct d2d_engine *e, uint32_t peer, uint32_t idx, uint64_t 
  * released eventually. */
 static int can_hold_more(const struct d2d_engine *e)
 {
-	return (deferred(e) + e->held + 1) * 2 <= e->nrx;
+	return deferred(e) + e->held + 1 <= e->defer_max;
 }
 
 /* Send the whole receive buffer where it lies. Returns non-zero when the buffer is now held, so the
@@ -294,7 +304,7 @@ static void route_buffer(struct d2d_engine *e, uint32_t idx, uint64_t len)
 		if (e->ack_len && ++e->freed >= D2D_ACK_BATCH && sq_available(e)) {
 			e->freed = 0;
 			((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = D2D_ACK;
-			doca_dpa_dev_rdma_post_send_imm(e->rdma[0], 0, e->mmap, e->tx_base,
+			doca_dpa_dev_rdma_post_send_imm(e->rx_rdma, 0, e->mmap, e->tx_base,
 							e->ack_len, 0,
 							DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
 		}

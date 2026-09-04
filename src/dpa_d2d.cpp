@@ -30,6 +30,7 @@ struct d2d_engine_arg {
 	uint32_t mmap;
 	uint64_t rdma[8];
 	uint32_t num_peers;
+	uint64_t rx_rdma;
 
 	uint64_t rx_base;
 	uint64_t buf_size;
@@ -70,6 +71,7 @@ struct d2d_engine_arg {
 	uint32_t defer_tail;
 	uint32_t no_zerocopy;
 	uint32_t gen_paused;
+	uint32_t defer_max;
 	uint64_t errors;
 	uint64_t last_err;
 	uint64_t first_err_rx;
@@ -232,8 +234,9 @@ void DpaD2D::wait_connected(double timeout_s)
 	}
 }
 
-bool DpaD2D::host_leg(uint16_t port, double timeout_s)
+bool DpaD2D::host_leg(uint16_t port, HostDir dir, double timeout_s)
 {
+	host_dir = dir;
 	hostleg = new HostLeg(dpa, dev);
 	hostleg->attach(engines[0].comp);
 	hostleg->listen(port);
@@ -267,8 +270,16 @@ void DpaD2D::start()
 		CHECK_DOCA(doca_mmap_dev_get_dpa_handle(mmap, dev, (doca_dpa_dev_mmap_t *)&a.mmap));
 		/* The host leg replaces engine 0's receive side: the kernel posts and forwards on
 		 * rdma[0], so pointing it at the host queue pair is the whole change. */
-		a.rdma[0] = (hostleg && i == 0) ? hostleg->dpa_handle() : e.rdma_handle;
+		/* Default shape: one leg, received on and forwarded out of. A host leg on engine 0
+		 * replaces one side of that, leaving the peer queue pair as the other. */
+		const bool hl = hostleg && i == 0;
+		const bool to_host = hl && host_dir == HostDir::ToHost;
+		a.rdma[0] = to_host ? hostleg->dpa_handle() : e.rdma_handle;
 		a.num_peers = 1;
+		a.rx_rdma = (hl && !to_host) ? hostleg->dpa_handle() : e.rdma_handle;
+		/* Receiving from a host, every buffer may be parked: stalling the host is the whole
+		 * point, and unlike a peer router it holds nothing this engine is waiting on. */
+		a.defer_max = (hl && !to_host) ? bufs_per_engine - 1 : bufs_per_engine / 2;
 		a.rx_base = e.rx_base;
 		a.tx_base = e.tx_base;
 		a.buf_size = buf_size;

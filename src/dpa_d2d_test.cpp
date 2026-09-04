@@ -55,14 +55,16 @@ static int env_int(const char *k, int d)
 int main(int argc, char **argv)
 {
 	const char *peer = NULL;
-	bool server = false, hostleg = false;
+	bool server = false, hostleg = false, chain_in = false, chain_out = false;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--server")) server = true;
 		else if (!strcmp(argv[i], "--peer") && i + 1 < argc) peer = argv[++i];
 		else if (!strcmp(argv[i], "--hostleg")) hostleg = true;
+		else if (!strcmp(argv[i], "--chain-in")) chain_in = true;
+		else if (!strcmp(argv[i], "--chain-out")) chain_out = true;
 	}
-	if (!server && !peer && !hostleg) {
-		printf("usage: --server | --peer <ip> | --hostleg\n");
+	if (!server && !peer && !hostleg && !chain_in && !chain_out) {
+		printf("usage: --server | --peer <ip> | --hostleg | --chain-in --peer <ip> | --chain-out\n");
 		return 1;
 	}
 
@@ -80,11 +82,55 @@ int main(int argc, char **argv)
 	if (env_int("D2D_FORWARD", 0))
 		for (int r = 0; r < (int)buddy::rdma::DpaD2D::kMaxRanks; r++) d2d.route_to_peer(r);
 
+	/* Full path: a host sends into DPU A, which routes it to DPU B, which delivers it to its own
+	 * host. Each engine receives on exactly one leg and forwards on the other, so the Arm is out of
+	 * the path from end to end. */
+	if (chain_in || chain_out) {
+		using HostDir = buddy::rdma::DpaD2D::HostDir;
+		const uint16_t port = (uint16_t)env_int("D2D_HOSTLEG_PORT", 18525);
+		const double hto = env_int("D2D_HOSTLEG_TIMEOUT", 120);
+
+		for (int r = 0; r < (int)buddy::rdma::DpaD2D::kMaxRanks; r++) d2d.route_to_peer(r);
+
+		int psock = peer_sock(chain_out ? NULL : peer);
+		if (psock < 0) FAIL("peer socket failed");
+		d2d.connect(psock, chain_out);
+		d2d.wait_connected();
+
+		printf("dpa-d2d %s: peer leg up, listening for the host on port %u\n",
+		       chain_in ? "chain-in" : "chain-out", port);
+		fflush(stdout);
+		if (!d2d.host_leg(port, chain_in ? HostDir::FromHost : HostDir::ToHost, hto))
+			FAIL("no host connected");
+		d2d.start();
+		printf("RESULT: %s armed\n", chain_in ? "chain-in" : "chain-out");
+		fflush(stdout);
+
+		auto p0 = d2d.sample();
+		for (int i = 0; i < seconds; i++) {
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+			const auto s = d2d.sample();
+			printf("dpa-d2d %s t=%2ds  rx %8lu/s  %9lu rec/s  total rx=%-9lu fwd=%-9lu zc=%-9lu txfull=%-7lu local=%-9lu bad=%lu errors=%lu\n",
+			       chain_in ? "chain-in " : "chain-out", i + 1, s.rx_msgs - p0.rx_msgs,
+			       s.records - p0.records, s.rx_msgs, s.forwards, s.zerocopy, s.tx_full,
+			       s.local, s.bad_records, s.errors);
+			fflush(stdout);
+			p0 = s;
+		}
+		const auto f = d2d.sample();
+		printf("RESULT: %s rx=%lu records=%lu forwards=%lu dropped=%lu bad=%lu errors=%lu\n",
+		       chain_in ? "chain-in" : "chain-out", f.rx_msgs, f.records, f.forwards, f.tx_full,
+		       f.bad_records, f.errors);
+		close(psock);
+		return (f.tx_full || f.bad_records || f.errors) ? 5 : 0;
+	}
+
 	if (hostleg) {
 		const uint16_t port = (uint16_t)env_int("D2D_HOSTLEG_PORT", 18525);
 		printf("dpa-d2d hostleg: listening on port %u\n", port);
 		fflush(stdout);
-		if (!d2d.host_leg(port, env_int("D2D_HOSTLEG_TIMEOUT", 60)))
+		if (!d2d.host_leg(port, buddy::rdma::DpaD2D::HostDir::FromHost,
+				   env_int("D2D_HOSTLEG_TIMEOUT", 60)))
 			FAIL("no host connected");
 		printf("RESULT: host connected to a DPA-datapath queue pair\n");
 		fflush(stdout);

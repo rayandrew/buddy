@@ -40,10 +40,15 @@ class DpaD2D {
     void connect(int sock, bool is_server);
     void wait_connected(double timeout_s = 60.0);
 
-    // Takes engine 0's receive side from a peer DPU to an ordinary ibverbs host, so a message the
-    // host sends is delivered into the DPA pool and walked by the routing kernel. Call instead of
-    // connect(), and before start(). Returns false if no host connected within @p timeout_s.
-    bool host_leg(uint16_t port, double timeout_s = 60.0);
+    // Which way engine 0's host leg carries traffic. FromHost makes it the receive side, so a
+    // message the host sends is walked by the routing kernel and forwarded to the peer DPU. ToHost
+    // makes it the forward side, so what arrives from the peer DPU is delivered to this node's
+    // host. Either way the Arm is not in the path.
+    enum class HostDir { FromHost, ToHost };
+
+    // Attaches a host leg to engine 0. Call before start(); combine with connect() to route between
+    // a host and a peer DPU. Returns false if no host connected within @p timeout_s.
+    bool host_leg(uint16_t port, HostDir dir = HostDir::FromHost, double timeout_s = 60.0);
 
     // Ranks default to local; anything left local is counted and dropped rather than forwarded.
     void route_to_peer(int rank);
@@ -88,6 +93,7 @@ class DpaD2D {
     uint8_t route[kMaxRanks];
     size_t ack_len = 0;
     bool no_zerocopy = false;
+    HostDir host_dir = HostDir::FromHost;
 };
 
 } // namespace buddy::rdma
