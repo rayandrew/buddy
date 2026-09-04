@@ -309,3 +309,62 @@ Note `d2d_size` defaults to 32 KB, which is inside the range where zero copy win
 The proxy's own loop (`proxy.cpp`) still does the routing for the ibverbs and DOCA legs. What is
 proven here is the replacement data path, not yet its substitution into `Proxy::rdma_loop`. That
 substitution is the remaining work, and it is now a wiring exercise rather than an open question.
+
+## Why this does not go into buddy
+
+The router above is fast because it forwards a buffer where it lies. buddy's traffic does not have
+that shape, and making it have that shape costs more than it saves. Both halves of that are measured.
+
+### buddy's buffers are mixed destination
+
+The host appends every request to one send buffer whatever its destination, so the DPU's real job is
+to sort and re-pack. Mean run of consecutive records sharing a destination, one proxy thread, 4
+ranks:
+
+| App | Records | Runs | Mean run |
+|---|---|---|---|
+| histo | 20000000 | 15003217 | 1.333 |
+| transpose | 3199581 | 2398247 | 1.334 |
+| sssp | 6692521 | 5022729 | 1.332 |
+| triangle | 12260539 | 1199547 | 10.221 |
+
+histo, transpose and sssp all pick destinations uniformly at random (`pe = index % PROCS` over a
+random index), and 1/(1 - 1/4) = 1.333 predicts the measurement exactly. triangle's access is
+structured and runs ten times longer, but ten 16-byte records is 160 bytes, so it still needs
+re-packing.
+
+A router that sends one message per run would post roughly one send per 1.3 records. That is far
+worse than the Arm, so run forwarding is not an option and per-destination aggregation on the device
+is the only way in.
+
+### Aggregation on the device is copy bound, and the DPA has no copy bandwidth
+
+Aggregating means copying every record, which is the one thing this hardware is bad at. Copy path,
+32 KB buffers:
+
+| Engines | Buffers/s | Bandwidth |
+|---|---|---|
+| 1 | 7640 | 250 MB/s |
+| 4 | 21260 | 697 MB/s |
+| 8 | 25975 | 851 MB/s |
+
+It saturates near 850 MB/s and adding engines stops helping, so the limit is DPA memory bandwidth
+rather than core speed. The same transport carries 4.45 GB/s when it is not copying, so the ceiling
+is the copy and not the network.
+
+Against one Arm proxy thread on the same workload, measured with the existing `TT_ROUTE` timer:
+20M records and 320 MB in 0.382 s, which is **52.4M records/s and 838 MB/s**.
+
+So the entire DPA, at every engine count, is worth about one Arm core at this work, and buddy's
+proxy has sixteen. Moving buddy's routing onto the DPA would make it slower.
+
+### What the result actually is
+
+DPA offload wins when the data path forwards by reference and loses when it re-packs by value:
+
+- Forward whole, 32 KB: 135823 buffers/s and 4.35M records/s, about **5x** one Arm core.
+- Re-pack per destination: 851 MB/s, about **1x** one Arm core, and it does not scale.
+
+buddy sits on the wrong side of that line. A workload whose buffers are already per destination -
+bulk point to point, or a halo exchange with per neighbour buffers - sits on the right side, and for
+those the host to DPU to DPU to host path measured above applies unchanged.
