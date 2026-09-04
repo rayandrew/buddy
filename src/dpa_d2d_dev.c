@@ -248,15 +248,25 @@ __dpa_global__ void d2d_handler(uint64_t arg)
 				break;
 			}
 			default:
-				/* Record when the first error hit, not just that it did: errors track the
-				 * engine count at about one each, so whether they land during the first
-				 * few messages or under load decides if this is a start-up race. */
+				/* Record when the first error hit, not just that it did: whether errors
+				 * land in the first few hundred messages or under load decides whether
+				 * this is bring-up or a race in the hot path. */
 				if (!e->errors) {
 					e->first_err_rx = e->rx_msgs;
 					e->first_err_tx = e->tx_msgs;
 				}
 				e->errors++;
 				e->last_err = t;
+				/* A failed receive still consumed its queue entry, so give the buffer back
+				 * and take it off the FIFO. Leaving it there shifts every later receive
+				 * onto the wrong buffer, which is why one error used to kill the engine
+				 * for the rest of the run rather than costing a single message. */
+				if (t == DOCA_DPA_DEV_COMP_RECV_ERR && e->rx_head != e->rx_tail) {
+					const uint32_t bad =
+						((uint32_t *)e->rxfifo_addr)[e->rx_head++ %
+									     D2D_PENDING];
+					repost(e, bad);
+				}
 				break;
 			}
 		}

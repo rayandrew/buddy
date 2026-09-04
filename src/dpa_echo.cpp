@@ -147,6 +147,9 @@ int main(int argc, char **argv)
 	doca_dpa *pf_dpa = nullptr, *dpa = nullptr;
 	CHECK_DOCA(doca_dpa_create(pf_dev, &pf_dpa));
 	CHECK_DOCA(doca_dpa_set_app(pf_dpa, buddy_dpa_app));
+	/* We never print from the device, and the log stream is a separate device channel that
+	 * has to be set up before start. Skipping it removes that dependency. */
+	CHECK_DOCA(doca_dpa_set_log_level(pf_dpa, DOCA_DPA_DEV_LOG_LEVEL_DISABLE));
 	CHECK_DOCA(doca_dpa_start(pf_dpa));
 	if (dev != pf_dev)
 		CHECK_DOCA(doca_dpa_device_extend(pf_dpa, dev, &dpa));

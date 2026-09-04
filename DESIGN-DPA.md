@@ -114,20 +114,26 @@ Each of these was found by measurement, and each fails silently with no error an
 are from healthy hardware: an earlier set was taken while one DPU's NIC was failing with transmit
 timeouts, and it understated the engine by about 2x at four engines.
 
-| engines | msg/s | records/s | errors |
-|---|---|---|---|
-| 1 | 93.5k | 2.99M | 0 |
-| 4 | 365k | 11.7M | 0 |
-| 8 | 571k | 18.3M | 1 |
-| 12 | **1.35M** | **43.1M** | 0 |
-| 16 | 1.28M | 41.0M | 0 |
+| engines | msg/s (three 10 s runs) | errors |
+|---|---|---|
+| 8 | 378k - 588k | 1 - 5 |
+| 12 | 521k - **1.35M** | 0 - 5 |
 
 Against ~150k for the DOCA CPU path at buddy's two threads, doing strictly less work: the engine
-routes every record. Engines are the scaling axis, not queue depth, and the knee is around twelve.
+routes every record. Engines are the scaling axis, not queue depth. **The spread is the error rate**:
+the run that reached 1.35M and 43.1M records per second took no errors, and every slower run took
+some. A single figure quoted from one run is misleading, which an earlier version of this table did.
 
-**One error still occurs and is unexplained.** About one in two million messages, on healthy
-hardware, with the receive-index fix in place. It is not harmless: the engine that takes it stops,
-which is why eight engines came in below the trend.
+**The errors do not lose data.** Client sends and server receives agree to within 0.1 percent
+(477,081 against 477,263 per second at eight engines), and the sender never reports an error. So a
+`RECV_ERR` here is a wasted receive slot rather than a message that arrived and could not be placed,
+and no retry is needed for correctness. It costs throughput, and the cost is large.
+
+**Errors used to cascade, and that is fixed.** A failed receive still consumed its queue entry, but
+the handler did not take it off the receive FIFO, so every later receive on that engine mapped to
+the wrong buffer and produced more errors. One bring-up error would take the engine down for the
+rest of the run: the worst run before the fix collapsed to 127k with 13 errors, and after it the
+worst is 378k. The first error is still unexplained; it arrives early, between 200 and 900 messages.
 
 ### Two limits found, and what they mean
 
