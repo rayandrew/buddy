@@ -120,7 +120,11 @@ static void route_buffer(struct d2d_engine *e, uint32_t idx, uint64_t len)
 		const uint64_t rec = sizeof(*h) + h->size;
 		uint32_t peer;
 
-		if (h->size == 0 || pos + rec > len) {
+		/* A zero size is the end of the message, not a malformed record. A completion does not
+		 * report how many bytes arrived, so the sender leaves this terminator and the walk stops
+		 * there instead of running into whatever the buffer held before. */
+		if (h->size == 0) break;
+		if (pos + rec > len) {
 			e->bad_records++;
 			break;
 		}
