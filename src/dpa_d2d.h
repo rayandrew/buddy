@@ -25,6 +25,7 @@ class DpaD2D {
   public:
     struct stats {
         uint64_t wakes, tx_msgs, rx_msgs, records, forwards, local, bad_records, errors, last_err;
+        uint64_t zerocopy, tx_full;
         uint64_t first_err_rx, first_err_tx;
     };
 
@@ -51,6 +52,10 @@ class DpaD2D {
     // credit to the peer. A side that never sends stops after the initially advertised supply.
     void set_ack(size_t len);
 
+    // Off forces every forward through a transmit-pool copy, which is the path that always makes
+    // progress. On lets a buffer routed entirely to one peer be sent where it lies.
+    void set_zerocopy(bool on);
+
     // Posts every engine's receives and starts the threads. Nothing may be routed before this.
     void start();
 
@@ -76,11 +81,13 @@ class DpaD2D {
     uint64_t pool_dev = 0;      // rx for every engine, then tx
     uint64_t pending_dev = 0;   // per-engine send FIFO, kept out of the argument block
     uint64_t rxfifo_dev = 0;    // per-engine record of which buffer each posted receive used
+    uint64_t defer_dev = 0;     // per-engine buffers received but not yet routed
     uint64_t args_dev = 0;
     Engine *engines = nullptr;
     HostLeg *hostleg = nullptr;
     uint8_t route[kMaxRanks];
     size_t ack_len = 0;
+    bool no_zerocopy = false;
 };
 
 } // namespace buddy::rdma

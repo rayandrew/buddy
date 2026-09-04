@@ -60,6 +60,16 @@ struct d2d_engine_arg {
 	uint64_t forwards;
 	uint64_t local;
 	uint64_t bad_records;
+	uint64_t zerocopy;
+	uint64_t tx_full;
+	uint32_t held;
+	uint32_t tx_inflight;
+	uint32_t freed;
+	uint64_t defer_addr;
+	uint32_t defer_head;
+	uint32_t defer_tail;
+	uint32_t no_zerocopy;
+	uint32_t gen_paused;
 	uint64_t errors;
 	uint64_t last_err;
 	uint64_t first_err_rx;
@@ -142,6 +152,7 @@ DpaD2D::DpaD2D(unsigned num_engines, unsigned bufs_per_engine, size_t buf_size)
 	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(d2d_engine_arg) * num_engines, &args_dev));
 	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint32_t) * 8192 * num_engines, &pending_dev));
 	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint32_t) * 8192 * num_engines, &rxfifo_dev));
+	CHECK_DOCA(doca_dpa_mem_alloc(dpa, sizeof(uint32_t) * 512 * num_engines, &defer_dev));
 
 	engines = new Engine[num_engines];
 	for (unsigned i = 0; i < num_engines; i++) {
@@ -237,6 +248,8 @@ void DpaD2D::route_to_peer(int rank)
 
 void DpaD2D::set_ack(size_t len) { ack_len = len; }
 
+void DpaD2D::set_zerocopy(bool on) { no_zerocopy = !on; }
+
 void DpaD2D::start()
 {
 	doca_dpa_dev_t dpa_handle = 0;
@@ -262,8 +275,10 @@ void DpaD2D::start()
 		a.nrx = bufs_per_engine;
 		a.ntx = bufs_per_engine;
 		a.ack_len = ack_len;
+		a.no_zerocopy = no_zerocopy ? 1 : 0;
 		a.pending_addr = pending_dev + (uint64_t)sizeof(uint32_t) * 8192 * i;
 		a.rxfifo_addr = rxfifo_dev + (uint64_t)sizeof(uint32_t) * 8192 * i;
+		a.defer_addr = defer_dev + (uint64_t)sizeof(uint32_t) * 512 * i;
 		a.num_ranks = kMaxRanks;
 		memcpy(a.route, route, sizeof(route));
 		CHECK_DOCA(doca_dpa_h2d_memcpy(dpa, e.arg_dev, &a, sizeof(a)));
@@ -319,6 +334,8 @@ DpaD2D::stats DpaD2D::sample() const
 		s.forwards += a.forwards;
 		s.local += a.local;
 		s.bad_records += a.bad_records;
+		s.zerocopy += a.zerocopy;
+		s.tx_full += a.tx_full;
 		s.errors += a.errors;
 		if (a.last_err) {
 			s.last_err = a.last_err;
@@ -343,6 +360,7 @@ DpaD2D::~DpaD2D()
 	/* Before the process is destroyed, or the device heap is left allocated and the next run
 	 * starts short of memory. */
 	if (dpa) {
+		if (defer_dev) doca_dpa_mem_free(dpa, defer_dev);
 		if (rxfifo_dev) doca_dpa_mem_free(dpa, rxfifo_dev);
 		if (pending_dev) doca_dpa_mem_free(dpa, pending_dev);
 		if (args_dev) doca_dpa_mem_free(dpa, args_dev);

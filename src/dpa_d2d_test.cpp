@@ -76,6 +76,7 @@ int main(int argc, char **argv)
 	buddy::rdma::DpaD2D d2d(engines, bufs, size);
 	/* The host posts no receives of its own, so an ack toward it would sit in RNR retry. */
 	d2d.set_ack(hostleg ? 0 : (size_t)env_int("D2D_ACK", 64));
+	d2d.set_zerocopy(env_int("D2D_ZEROCOPY", 1) != 0);
 	if (env_int("D2D_FORWARD", 0))
 		for (int r = 0; r < (int)buddy::rdma::DpaD2D::kMaxRanks; r++) d2d.route_to_peer(r);
 
@@ -124,10 +125,10 @@ int main(int argc, char **argv)
 	for (int i = 0; i < seconds; i++) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		const auto s = d2d.sample();
-		printf("dpa-d2d %s t=%2ds  rx %8lu/s  tx %8lu/s  %10lu rec/s  wakes=%-10lu fwd=%-9lu local=%-9lu bad=%lu errors=%lu last=0x%lx first_err@rx=%lu\n",
+		printf("dpa-d2d %s t=%2ds  rx %8lu/s  tx %8lu/s  %10lu rec/s  wakes=%-10lu fwd=%-9lu zc=%-9lu txfull=%-7lu local=%-9lu bad=%lu errors=%lu last=0x%lx first_err@rx=%lu\n",
 		       server ? "server" : "client", i + 1, s.rx_msgs - prev.rx_msgs,
 		       s.tx_msgs - prev.tx_msgs, s.records - prev.records, s.wakes, s.forwards,
-		       s.local, s.bad_records, s.errors, s.last_err, s.first_err_rx);
+		       s.zerocopy, s.tx_full, s.local, s.bad_records, s.errors, s.last_err, s.first_err_rx);
 		fflush(stdout);
 		prev = s;
 	}

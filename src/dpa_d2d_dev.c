@@ -17,6 +17,16 @@
 #define D2D_MAX_BUFS 512
 /* Completions handled per drain pass before the handler must return to the scheduler. */
 #define D2D_DRAIN_MAX 8
+/* Outstanding sends allowed, well under the 1024 the send queue is created with. Handling one
+ * receive can post more than one send, so without a ceiling the queue overruns and the posts stop
+ * completing: measured as every counter freezing after about 10k sends. */
+#define D2D_SQ_MAX 512
+/* Freed buffers per credit ack. One ack per buffer doubles the sends a receive generates, which is
+ * what overruns the queue above. */
+#define D2D_ACK_BATCH 16
+/* Sends one buffer's routing may need before the walk is worth starting. A walk that runs out of
+ * capacity half way cannot be retried without re-sending what it already sent. */
+#define D2D_ROUTE_MARGIN 4
 
 /* Mirrors buddy::request_head. Records are packed head to tail with no padding. */
 struct request_head {
@@ -76,6 +86,20 @@ struct d2d_engine {
 	uint64_t forwards;
 	uint64_t local;
 	uint64_t bad_records;
+	uint64_t zerocopy;      /* forwards posted out of the receive buffer, with no copy */
+	uint64_t tx_full;       /* forwards dropped because every transmit slot was still in flight */
+	uint32_t held;          /* receive buffers held for an outstanding zero-copy forward */
+	uint32_t tx_inflight;   /* transmit slots the NIC may still be reading */
+	uint32_t freed;         /* buffers freed since the last credit ack */
+	/* Buffers received but not yet routed, because there was no room to post their forwards. They
+	 * are not re-posted while they sit here, which is the back-pressure that slows the peer: it is
+	 * the alternative to dropping their records. Bounded by the same half-the-pool rule as held
+	 * buffers, so a receive is always posted and the peer's sends always land. */
+	uint64_t defer_addr;
+	uint32_t defer_head;
+	uint32_t defer_tail;
+	uint32_t no_zerocopy;   /* set by the host to force the copy path, for measurement */
+	uint32_t gen_paused;    /* generated sends withheld while routing was short of room */
 	uint64_t errors;
 	uint64_t last_err;
 	uint64_t first_err_rx;  /* rx_msgs when the first error hit */
@@ -86,6 +110,12 @@ struct d2d_engine {
 /* Marks a pending send as generated rather than forwarded, so its completion re-arms the generator
  * instead of releasing a receive buffer. Both kinds share a queue pair and complete in order. */
 #define D2D_GEN 0xFFFFFFFFu
+/* An ack carries no staged bytes, so it takes no transmit slot and its completion neither frees one
+ * nor re-arms the generator. It still needs a pending entry to keep the FIFO aligned. */
+#define D2D_ACK 0xFFFFFFFEu
+/* A copy forward frees its transmit slot but must not re-arm the generator: counting it as one
+ * inflated the window by every forward ever made, until no slot was ever free again. */
+#define D2D_TX 0xFFFFFFFDu
 
 static void repost(struct d2d_engine *e, uint32_t idx)
 {
@@ -103,26 +133,101 @@ static void copy_bytes(uint64_t dst, uint64_t src, uint64_t len)
 		*(uint8_t *)(dst + i) = *(const uint8_t *)(src + i);
 }
 
+/* True while a transmit slot is free. Without this the pool wraps and a slot is overwritten while
+ * the NIC is still reading it. Only the paths that stage bytes into the transmit pool are counted:
+ * a zero-copy forward sends out of its receive buffer and takes no slot. */
+static int sq_available(const struct d2d_engine *e)
+{
+	return (uint32_t)(e->pend_tail - e->pend_head) < D2D_SQ_MAX;
+}
+
+static int tx_available(const struct d2d_engine *e)
+{
+	return e->tx_inflight < e->ntx && sq_available(e);
+}
+
+static uint32_t deferred(const struct d2d_engine *e)
+{
+	return (uint32_t)(e->defer_tail - e->defer_head);
+}
+
+/* Room to walk a buffer and post every forward it needs. */
+static int route_capacity(const struct d2d_engine *e)
+{
+	return e->tx_inflight + D2D_ROUTE_MARGIN <= e->ntx &&
+	       (uint32_t)(e->pend_tail - e->pend_head) + D2D_ROUTE_MARGIN <= D2D_SQ_MAX;
+}
+
+/* Half the pool stays posted as receives, so the peer always has somewhere to deliver and the sends
+ * this engine is waiting on always complete. */
+static int can_defer(const struct d2d_engine *e)
+{
+	return (deferred(e) + e->held + 1) * 2 <= e->nrx;
+}
+
+/* Every user of a transmit slot marks its pending entry the same way, so the completion path gives
+ * the slot back without needing to know which kind of send it was. */
+static void tx_claim(struct d2d_engine *e, uint32_t kind)
+{
+	e->tx_inflight++;
+	((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = kind;
+}
+
 /* Forward one byte range to a peer through a send buffer.
  *
  * Sending straight out of the receive buffer saves the copy but holds that buffer until the send
  * completes, and with symmetric traffic both sides can end up holding every buffer waiting for a
  * completion the peer can no longer produce: measured as a hard stall after about 1255 buffers with
- * no error anywhere. Copying decouples them, and the Arm proxy copies too. Zero copy needs real
- * credits first, so the peer's capacity is known before a forward is posted. */
+ * no error anywhere. Copying decouples them, so it is the path that always makes progress; see
+ * forward_in_place for when the copy is skipped. */
 static void forward(struct d2d_engine *e, uint32_t peer, uint32_t idx, uint64_t off, uint64_t len)
 {
-	const uint32_t s = e->next_tx++ % e->ntx;
-	const uint64_t dst = e->tx_base + (uint64_t)s * e->buf_size;
+	uint32_t s;
+	uint64_t dst;
+
+	if (!tx_available(e)) {
+		e->tx_full++;
+		return;
+	}
+	s = e->next_tx++ % e->ntx;
+	dst = e->tx_base + (uint64_t)s * e->buf_size;
 
 	copy_bytes(dst, e->rx_base + (uint64_t)idx * e->buf_size + off, len);
 	/* Terminate it, or the receiver walks past this run into the previous contents. */
 	if (len + sizeof(struct request_head) <= e->buf_size)
 		*(uint64_t *)(dst + len) = 0;
-	((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = D2D_GEN;
+	tx_claim(e, D2D_TX);
 	doca_dpa_dev_rdma_post_send_imm(e->rdma[peer], 0, e->mmap, dst, e->buf_size, 0,
 					DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
 	e->forwards++;
+}
+
+/* Holding every receive buffer for an outstanding forward is what deadlocked the symmetric case:
+ * neither side had a receive posted, so neither side's sends could complete. Keeping half the pool
+ * posted at all times means a peer always has somewhere to deliver, so a held buffer is always
+ * released eventually. */
+static int can_hold_more(const struct d2d_engine *e)
+{
+	return (deferred(e) + e->held + 1) * 2 <= e->nrx;
+}
+
+/* Send the whole receive buffer where it lies. Returns non-zero when the buffer is now held, so the
+ * caller must not re-post it: the completion path does that once the send is done. */
+static int forward_in_place(struct d2d_engine *e, uint32_t peer, uint32_t idx)
+{
+	if (!sq_available(e)) {
+		e->tx_full++;
+		return 0;
+	}
+	e->refcount[idx] = 1;
+	e->held++;
+	((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = idx;
+	doca_dpa_dev_rdma_post_send_imm(e->rdma[peer], 0, e->mmap,
+					e->rx_base + (uint64_t)idx * e->buf_size, e->buf_size, 0,
+					DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
+	e->forwards++;
+	e->zerocopy++;
+	return 1;
 }
 
 /* Walk the records and forward each run of consecutive records sharing a destination as one send.
@@ -133,7 +238,7 @@ static void route_buffer(struct d2d_engine *e, uint32_t idx, uint64_t len)
 	const uint64_t buf = e->rx_base + (uint64_t)idx * e->buf_size;
 	uint64_t pos = 0, run_start = 0;
 	uint32_t run_peer = D2D_LOCAL;
-	int have_run = 0;
+	int have_run = 0, held_here = 0;
 
 	while (pos + sizeof(struct request_head) <= len) {
 		const struct request_head *h = (const struct request_head *)(buf + pos);
@@ -168,21 +273,27 @@ static void route_buffer(struct d2d_engine *e, uint32_t idx, uint64_t len)
 	}
 
 	if (have_run) {
-		if (run_peer != D2D_LOCAL)
-			forward(e, run_peer, idx, run_start, pos - run_start);
-		else
+		if (run_peer == D2D_LOCAL)
 			e->local++;
+		/* The whole buffer is one run to one peer, which is buddy's common case: send it as it
+		 * lies, terminator and all, instead of copying it to a transmit slot. */
+		else if (run_start == 0 && !e->no_zerocopy && can_hold_more(e))
+			held_here = forward_in_place(e, run_peer, idx);
+		else
+			forward(e, run_peer, idx, run_start, pos - run_start);
 	}
 
-	/* Free immediately: a forward copies out of the buffer rather than sending from it. */
 	{
-		repost(e, idx);
+		/* A held buffer goes back only when its forward completes; anything else is free now
+		 * because the forward copied out of it. */
+		if (!held_here) repost(e, idx);
 		/* Tell the peer the buffer is free again. A side that only receives never sends, so
 		 * nothing carries that back and it stops after the initially advertised supply:
 		 * measured as exactly 128 posted plus 383 re-posts, every run. buddy's ACK does this
 		 * job, which is why the credit protocol has to live here too. */
-		if (e->ack_len) {
-			((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = D2D_GEN;
+		if (e->ack_len && ++e->freed >= D2D_ACK_BATCH && sq_available(e)) {
+			e->freed = 0;
+			((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = D2D_ACK;
 			doca_dpa_dev_rdma_post_send_imm(e->rdma[0], 0, e->mmap, e->tx_base,
 							e->ack_len, 0,
 							DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
@@ -192,12 +303,52 @@ static void route_buffer(struct d2d_engine *e, uint32_t idx, uint64_t len)
 
 static void post_generated(struct d2d_engine *e)
 {
-	const uint32_t s = e->next_tx++ % e->ntx;
+	uint32_t s;
+
+	if (!tx_available(e)) {
+		e->tx_full++;
+		return;
+	}
+	s = e->next_tx++ % e->ntx;
 	e->tx_msgs++;
-	((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = D2D_GEN;
+	tx_claim(e, D2D_GEN);
 	doca_dpa_dev_rdma_post_send_imm(e->rdma[0], 0, e->mmap,
 					e->tx_base + (uint64_t)s * e->buf_size, e->tx_len, 0,
 					DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
+}
+
+/* Route a buffer now if there is room, otherwise park it. A parked buffer keeps its records and
+ * keeps its receive slot out of circulation, which is what tells the peer to slow down. */
+static void route_or_defer(struct d2d_engine *e, uint32_t idx)
+{
+	if (route_capacity(e)) {
+		route_buffer(e, idx, e->buf_size);
+		return;
+	}
+	if (can_defer(e)) {
+		((uint32_t *)e->defer_addr)[e->defer_tail++ % D2D_MAX_BUFS] = idx;
+		return;
+	}
+	/* Neither room to route nor room to park. Re-posting loses the records, so this must stay at
+	 * zero; a non-zero count means the back-pressure above is not holding. */
+	e->tx_full++;
+	repost(e, idx);
+}
+
+static void drain_deferred(struct d2d_engine *e)
+{
+	while (e->defer_head != e->defer_tail && route_capacity(e)) {
+		const uint32_t idx = ((uint32_t *)e->defer_addr)[e->defer_head++ % D2D_MAX_BUFS];
+		route_buffer(e, idx, e->buf_size);
+	}
+	/* Give the generator its window back only once routing is comfortably clear, not the instant
+	 * the queue empties: resuming on the first free slot just re-fills the pool and parks the next
+	 * buffer, and the two oscillate instead of the backlog draining. */
+	while (e->gen_paused && e->defer_head == e->defer_tail && e->held == 0 && e->tx_len &&
+	       e->tx_inflight * 4 <= e->ntx && sq_available(e)) {
+		e->gen_paused--;
+		post_generated(e);
+	}
 }
 
 __dpa_rpc__ uint64_t d2d_generate(uint64_t arg, uint64_t window, uint64_t len)
@@ -256,7 +407,7 @@ __dpa_global__ void d2d_handler(uint64_t arg)
 				}
 				idx = ((uint32_t *)e->rxfifo_addr)[e->rx_head++ % D2D_PENDING];
 				e->rx_msgs++;
-				route_buffer(e, idx, e->buf_size);
+				route_or_defer(e, idx);
 				break;
 			}
 			case DOCA_DPA_DEV_COMP_SEND: {
@@ -264,10 +415,29 @@ __dpa_global__ void d2d_handler(uint64_t arg)
 					const uint32_t idx =
 						((uint32_t *)e->pending_addr)[e->pend_head++ %
 								 D2D_PENDING];
-					if (idx == D2D_GEN)
-						{ if (e->tx_len) post_generated(e); }
-					else if (e->refcount[idx] && --e->refcount[idx] == 0)
+					if (idx == D2D_ACK) {
+						/* nothing to release */
+					} else if (idx == D2D_TX) {
+						if (e->tx_inflight) e->tx_inflight--;
+					} else if (idx == D2D_GEN) {
+						if (e->tx_inflight) e->tx_inflight--;
+						/* Routing owns the transmit pool first. A generator that
+						 * keeps its window full while buffers are parked starves
+						 * the forwards that would unpark them, and the records in
+						 * them are lost. */
+						if (!e->tx_len) {
+							/* not a generator */
+						} else if (e->defer_head != e->defer_tail ||
+							   !route_capacity(e)) {
+							e->gen_paused++;
+						} else {
+							post_generated(e);
+						}
+					}
+					else if (e->refcount[idx] && --e->refcount[idx] == 0) {
+						if (e->held) e->held--;
 						repost(e, idx);
+					}
 				}
 				break;
 			}
@@ -295,6 +465,7 @@ __dpa_global__ void d2d_handler(uint64_t arg)
 			}
 		}
 
+		drain_deferred(e);
 		doca_dpa_dev_completion_request_notification(e->comp);
 		if (!drained) break;
 	}
