@@ -275,3 +275,37 @@ The generator is a benchmark artifact and needs care: with both sides forwarding
 circulates in a closed loop, and a node that also injects new load exceeds its own send ceiling and
 must drop. The router-only shape (one side generates and sinks, the other routes) is the
 measurement that means anything, and it is lossless.
+
+### Full path (step 5), verified
+
+The path buddy's proxy actually needs now runs entirely on the device:
+
+```
+host sm7  --ibverbs-->  sm7-bf DPA  --RoCE-->  sm8-bf DPA  --ibverbs-->  host sm8
+```
+
+300000 messages of 32 KB, 9.6M records, conserved exactly at all four hops: no dropped buffers, no
+malformed records, no errors, every forward zero copy. 29677 msg/s and 0.97 GB/s end to end, which
+is the host client's limit rather than the device's - the router alone sustains 135823 buffers/s and
+4.35M records/s at the same 32 KB.
+
+Two things made this work.
+
+**One inbound leg per engine.** A completion does not say which queue pair produced it, so an engine
+receiving on both its host leg and its peer leg cannot tell which buffer was just filled. Each
+engine receives on exactly one leg and forwards on the other, and owns every queue pair it posts to,
+so no two threads ever post to the same one.
+
+**Parking limits are per leg.** Half the pool is the right cap only between two routers, where both
+holding everything is a deadlock. An engine fed by a host may park its entire pool: stalling the
+host is exactly the intent, and unlike a peer router the host holds nothing the engine is waiting
+on. Capping the host leg at half made it drop 96% of what arrived, because the drop path ran long
+before the back-pressure could.
+
+Note `d2d_size` defaults to 32 KB, which is inside the range where zero copy wins by a wide margin.
+
+### Still on the Arm
+
+The proxy's own loop (`proxy.cpp`) still does the routing for the ibverbs and DOCA legs. What is
+proven here is the replacement data path, not yet its substitution into `Proxy::rdma_loop`. That
+substitution is the remaining work, and it is now a wiring exercise rather than an open question.
