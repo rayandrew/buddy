@@ -64,9 +64,9 @@ if(DPA_FABRIC)
 	add_dependencies(dpa-echo buddy_dpa_kernel)
 	target_link_libraries(dpa-echo PRIVATE buddy_common)
 
-	add_executable(dpa-d2d ${common_src} dpa_d2d.cpp dpa_d2d_test.cpp)
+	add_executable(dpa-d2d ${common_src} dpa_d2d.cpp dpa_hostleg.cpp dpa_d2d_test.cpp)
 	add_dependencies(dpa-d2d buddy_dpa_kernel)
-	target_link_libraries(dpa-d2d PRIVATE buddy_common)
+	target_link_libraries(dpa-d2d PRIVATE buddy_common -lrdmacm)
 endif()
 
 if(DOCA_FABRIC OR DPA_FABRIC)
