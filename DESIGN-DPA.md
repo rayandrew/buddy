@@ -222,3 +222,56 @@ coherency cost; 3 and 4 are where the win appears.
 - **A correctness bug is open in the current fabric**: roughly 5 to 10 percent of triangle runs
   return a wrong count, and a `RECV_ERR` of unknown cause stalls small windows. The rewrite deletes
   the machinery both are suspected to live in, but that must be confirmed rather than assumed.
+
+## Results
+
+### Host leg (step 2), verified
+
+An x86 host running plain rdmacm and ibverbs connects to a queue pair whose data path is on the
+DPU's DPA, and its messages land in DPA memory where the routing kernel walks them without the Arm
+seeing anything. Measured sm7 to sm7-bf: 64 messages of 4096 bytes, 2048 records, no malformed
+records and no errors.
+
+`doca_rdma_export` cannot carry this connection. Its blob is opaque to ibverbs, and the host runs
+DOCA 3.2.1025 against the DPU's 3.0.0058 with no SDK headers installed at all. The path that works
+is `doca_rdma_bridge_prepare_connection` plus `doca_rdma_bridge_accept`: the DPU owns the listen and
+hands DOCA the accepted `rdma_cm_id`. This closes the risk listed above.
+
+### Zero-copy forwarding (step 3), verified
+
+A buffer whose records all route to one peer is sent out of the receive buffer it arrived in. The
+win depends entirely on buffer size, because the copy is not what limits the small case:
+
+| Buffer | Zero copy | Copy | Ratio |
+|---|---|---|---|
+| 4 KB | 15276 buf/s, 489k rec/s | 15765 buf/s, 504k rec/s | 0.97 |
+| 64 KB | 27891 buf/s, 893k rec/s | 4077 buf/s, 130k rec/s | 6.8 |
+
+At 4 KB the send and receive rate is the ceiling and holding buffers for an outstanding forward
+costs slightly more than the copy saves. Both configurations are lossless: forwards equal receives,
+nothing dropped, no errors, no malformed records.
+
+### The transmit pool was never accounted for
+
+Slots were taken with `next_tx++ % ntx` and no check that the previous send had completed, so the
+NIC could be reading a slot that had already been overwritten. Bounding it uncovered three further
+faults, each of which presents as a stall rather than an error:
+
+- A copy forward's completion was indistinguishable from a generated send, so it re-armed the
+  generator. The window grew by every forward ever made until no slot was free again.
+- One ack per freed buffer makes a single receive post two sends. The send queue overruns, posts
+  stop completing, and every counter freezes: measured at about 10k sends. Acks are now batched.
+- A buffer that could not be forwarded was re-posted, which silently loses its records. It is now
+  parked instead, and an un-reposted receive is what tells the peer to slow down.
+
+### Flow control is back-pressure, not credits
+
+Explicit credits turn out not to be needed. RNR retry is infinite, so a send to a peer with no
+posted receive waits rather than failing, and the only real hazard is the symmetric case where both
+sides hold every buffer and neither can post a receive. Keeping half of each pool posted at all
+times removes that, and parking the rest supplies the back-pressure. This replaces step 4.
+
+The generator is a benchmark artifact and needs care: with both sides forwarding, traffic
+circulates in a closed loop, and a node that also injects new load exceeds its own send ceiling and
+must drop. The router-only shape (one side generates and sinks, the other routes) is the
+measurement that means anything, and it is lossless.
