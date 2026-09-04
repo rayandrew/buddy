@@ -63,6 +63,19 @@ host x86 --ibverbs RC--> [ DPA memory ] --DOCA RDMA on DPA--> [ remote DPA memor
 The host side of the host leg is unchanged: plain ibverbs against a standard RC queue pair. Only
 the DPU side of that connection becomes DOCA RDMA with `doca_ctx_set_datapath_on_dpa`.
 
+**How the two ends meet.** Not through `doca_rdma_export`: that blob is opaque to ibverbs, and the
+host runs DOCA 3.2.1025 against the DPU's 3.0.0058 anyway, with no SDK headers installed host-side.
+DOCA RDMA includes `<rdma/rdma_cma.h>` and exposes a bridge for an application that owns its own
+listen:
+
+```c
+doca_rdma_bridge_prepare_connection(rdma, cm_id, &rdma_connection);
+doca_rdma_bridge_accept(...);
+```
+
+So the DPU listens with plain RDMA CM, hands the `rdma_cm_id` to DOCA, and the host connects as an
+ordinary rdmacm client. No DOCA on the host, no blob, and the version skew stops mattering.
+
 ### Measured, with `src/dpa_echo.cpp`
 
 The architecture, before any routing: buffers in DPA memory, a thread woken by completions, the Arm
