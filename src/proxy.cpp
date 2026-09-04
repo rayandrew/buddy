@@ -855,8 +855,14 @@ void Proxy::print_counters()
     std::cout << "--- destination runs ---" << std::endl;
     std::cout << "records\t" << in_total.records << std::endl;
     std::cout << "runs\t" << in_total.runs << std::endl;
-    if (in_total.runs)
+    if (in_total.runs) {
       std::cout << "mean_run_len\t" << (double)in_total.records / in_total.runs << std::endl;
+      // Bytes, not records, is what decides a device-side router: a run is one message, so this
+      // against the buffer size is the number of sends that buffer would cost.
+      std::cout << "bytes_per_run\t"
+                << (double)(in_total.bytes_local + in_total.bytes_remote) / in_total.runs
+                << std::endl;
+    }
     std::cout << "------------------------" << std::endl;
 
     std::cout << "--- network bytes ---" << std::endl;
