@@ -732,6 +732,12 @@ void Proxy::rdma_loop()
       poll_send_queue(blocklist);
 #ifdef BUDDY_FABRIC
       const bool fabric_work = fabric_poll(blocklist);
+      // A D2D arrival is traffic, so it has to defer the quiet-time flush the same way a host
+      // arrival does. Only poll_recv_queue updates last_recv, and on this leg that is the host CQ
+      // alone: the ibverbs leg carries both on one CQ, so its timer sees D2D and this one did not.
+      // The proxy therefore believed it was idle while D2D was flowing and shipped partial buffers,
+      // 69 percent of its host deliveries against 15 percent on the ibverbs leg.
+      if (fabric_work) last_recv = omp_get_wtime();
       // Nothing anywhere: park on the engine instead of spinning. The timeout bounds how long the
       // local queues wait, and 0 (the default) keeps the original busy-poll.
       if (config.doca_event_us > 0 && !recv && !fabric_work && blocklist.empty())
