@@ -94,13 +94,33 @@ static void repost(struct d2d_engine *e, uint32_t idx)
 				       e->rx_base + (uint64_t)idx * e->buf_size, e->buf_size);
 }
 
-/* Forward one byte range to a peer straight out of the buffer it arrived in. */
+static void copy_bytes(uint64_t dst, uint64_t src, uint64_t len)
+{
+	uint64_t i = 0;
+	for (; i + 8 <= len; i += 8)
+		*(uint64_t *)(dst + i) = *(const uint64_t *)(src + i);
+	for (; i < len; i++)
+		*(uint8_t *)(dst + i) = *(const uint8_t *)(src + i);
+}
+
+/* Forward one byte range to a peer through a send buffer.
+ *
+ * Sending straight out of the receive buffer saves the copy but holds that buffer until the send
+ * completes, and with symmetric traffic both sides can end up holding every buffer waiting for a
+ * completion the peer can no longer produce: measured as a hard stall after about 1255 buffers with
+ * no error anywhere. Copying decouples them, and the Arm proxy copies too. Zero copy needs real
+ * credits first, so the peer's capacity is known before a forward is posted. */
 static void forward(struct d2d_engine *e, uint32_t peer, uint32_t idx, uint64_t off, uint64_t len)
 {
-	e->refcount[idx]++;
-	((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = idx;
-	doca_dpa_dev_rdma_post_send_imm(e->rdma[peer], 0, e->mmap,
-					e->rx_base + (uint64_t)idx * e->buf_size + off, len, 0,
+	const uint32_t s = e->next_tx++ % e->ntx;
+	const uint64_t dst = e->tx_base + (uint64_t)s * e->buf_size;
+
+	copy_bytes(dst, e->rx_base + (uint64_t)idx * e->buf_size + off, len);
+	/* Terminate it, or the receiver walks past this run into the previous contents. */
+	if (len + sizeof(struct request_head) <= e->buf_size)
+		*(uint64_t *)(dst + len) = 0;
+	((uint32_t *)e->pending_addr)[e->pend_tail++ % D2D_PENDING] = D2D_GEN;
+	doca_dpa_dev_rdma_post_send_imm(e->rdma[peer], 0, e->mmap, dst, e->buf_size, 0,
 					DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
 	e->forwards++;
 }
@@ -154,8 +174,8 @@ static void route_buffer(struct d2d_engine *e, uint32_t idx, uint64_t len)
 			e->local++;
 	}
 
-	/* Nothing was forwarded out of it, so it is free immediately. */
-	if (e->refcount[idx] == 0) {
+	/* Free immediately: a forward copies out of the buffer rather than sending from it. */
+	{
 		repost(e, idx);
 		/* Tell the peer the buffer is free again. A side that only receives never sends, so
 		 * nothing carries that back and it stops after the initially advertised supply:
