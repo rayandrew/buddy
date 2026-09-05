@@ -858,6 +858,7 @@ void Proxy::print_counters()
     std::cout << "count_out_remote\t" << out_total.count_remote << std::endl;
     std::cout << "------------------" << std::endl;
 
+#ifdef BUDDY_COUNT_RUNS
     std::cout << "--- destination runs ---" << std::endl;
     std::cout << "records\t" << in_total.records << std::endl;
     std::cout << "runs\t" << in_total.runs << std::endl;
@@ -870,6 +871,7 @@ void Proxy::print_counters()
                 << std::endl;
     }
     std::cout << "------------------------" << std::endl;
+#endif
 
     std::cout << "--- network bytes ---" << std::endl;
     std::cout << "bytes_in_local\t" << in_total.bytes_local << std::endl;
@@ -983,16 +985,25 @@ bool Proxy::route_reqs(ReqBufRead &reader, std::list<blocked_req>& blocklist)
 
   request_head *head;
   char *data;
+  // Off unless BUDDY_COUNT_RUNS is defined. This is the innermost per-record loop: counting there
+  // cost 1.175x on Triangle when the counters were incremented directly, and still 1.079x once
+  // accumulated in registers (both p<=0.0003 against upstream). The run-length metric is wanted
+  // occasionally, so it is compiled in rather than paid for on every run.
+#ifdef BUDDY_COUNT_RUNS
   int32_t run_dst = -1;
+  uint64_t n_records = 0, n_runs = 0;
+#endif
   while (reader.peek(&head, &data)) {
     CHECK(head->dst >= 0 && head->dst < world_size);
     route r = routing_table[head->dst];
 
-    in_counters[tid].records++;
+#ifdef BUDDY_COUNT_RUNS
+    n_records++;
     if (head->dst != run_dst) {
-      in_counters[tid].runs++;
+      n_runs++;
       run_dst = head->dst;
     }
+#endif
 
     auto send_bufs = &d2h_send[tid];
     if (r.remote)
@@ -1028,6 +1039,11 @@ bool Proxy::route_reqs(ReqBufRead &reader, std::list<blocked_req>& blocklist)
       break;
     }
   }
+
+#ifdef BUDDY_COUNT_RUNS
+  in_counters[tid].records += n_records;
+  in_counters[tid].runs += n_runs;
+#endif
 
   if (progress)
     last_thread_progress[tid] = omp_get_wtime();
