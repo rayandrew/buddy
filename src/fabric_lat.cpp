@@ -119,6 +119,9 @@ int main(int argc, char **argv)
 	const int window = env_int("LAT_WINDOW", 1);
 	const int nthr = env_int("LAT_THREADS", 1);
 	const size_t msg = (size_t)env_int("LAT_SIZE", 4080);
+	/* The host-side knob of the E1 evaluation: a sleep before each completion poll. The device
+	 * finished at the same time; the program only looked later. */
+	const int sleep_us = env_int("LAT_SLEEP_US", 0);
 
 	/* One receive slot per in-flight message per thread, plus the same again for sends, so no two
 	 * messages ever share a buffer. */
@@ -284,6 +287,7 @@ int main(int argc, char **argv)
 					f.send_imm(0, 0, 0x1, send_off + (size_t)slot * SLOT, msg,
 						   500 + slot);
 				}
+				if (sleep_us) usleep(sleep_us);
 				if (!drain_one(&c)) continue;
 				if (c.op != buddy::rdma::Fabric::OP_RECV) continue;
 				const int slot = (int)(c.wr_id - 1000);
@@ -314,6 +318,10 @@ int main(int argc, char **argv)
 		       kFabric, window, nthr, all.size(), all.front(), all[all.size() / 2],
 		       all[all.size() * 99 / 100], done.load() * 1e6 / elapsed,
 		       bad.load(std::memory_order_relaxed));
+	/* The one line every E1 program prints. */
+	printf("ops=%ld bytes=%zu wall_ns=%.0f sleep_us=%d window=%d\n", done.load(), msg,
+	       elapsed * 1e3 / (done.load() ? done.load() : 1), sleep_us, window);
+	fflush(stdout);
 
 	{
 		char sync = 1;
