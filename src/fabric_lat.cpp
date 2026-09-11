@@ -283,6 +283,7 @@ int main(int argc, char **argv)
 			mine.reserve(total / nthr + 1);
 
 			while (done.load(std::memory_order_relaxed) < total) {
+				bool posted = false;
 				for (;;) {
 					int slot = -1;
 					{
@@ -298,8 +299,10 @@ int main(int argc, char **argv)
 					issued[slot] = now_us();
 					f.send_imm(0, 0, 0x1, send_off + (size_t)slot * slot_bytes, msg,
 						   500 + slot);
+					posted = true;
 				}
-				if (sleep_us) pause_us(sleep_us);
+				/* Once per send, not per poll: the time the host looks away after posting. */
+				if (sleep_us && posted) pause_us(sleep_us);
 				if (!drain_one(&c)) continue;
 				if (c.op != buddy::rdma::Fabric::OP_RECV) continue;
 				const int slot = (int)(c.wr_id - 1000);
