@@ -98,6 +98,15 @@ static void invalidate_range(void *p, size_t len)
 	asm volatile("dsb sy" ::: "memory");
 }
 
+/* The E1 host-side knob is a busy wait: usleep overshoots by the timer slack, about 50 us on
+ * the BlueField, so a 1 us sleep would not be one. */
+static void pause_us(int us)
+{
+	const double until = now_us() + us;
+	while (now_us() < until) {
+	}
+}
+
 static int env_int(const char *k, int dflt)
 {
 	const char *e = getenv(k);
@@ -121,7 +130,7 @@ int main(int argc, char **argv)
 	/* One slot per message, page aligned; a 4 KB slot carries the default 4080-byte message. */
 	const size_t slot_bytes = (msg + 4095) & ~(size_t)4095;
 	const int warmup = env_int("LAT_WARMUP", 0);
-	/* The host-side knob of the E1 evaluation: a sleep before each completion poll. The device
+	/* The host-side knob of the E1 evaluation: a wait before each completion poll. The device
 	 * finished at the same time; the program only looked later. */
 	const int sleep_us = env_int("LAT_SLEEP_US", 0);
 
@@ -290,7 +299,7 @@ int main(int argc, char **argv)
 					f.send_imm(0, 0, 0x1, send_off + (size_t)slot * slot_bytes, msg,
 						   500 + slot);
 				}
-				if (sleep_us) usleep(sleep_us);
+				if (sleep_us) pause_us(sleep_us);
 				if (!drain_one(&c)) continue;
 				if (c.op != buddy::rdma::Fabric::OP_RECV) continue;
 				const int slot = (int)(c.wr_id - 1000);
