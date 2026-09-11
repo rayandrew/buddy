@@ -37,7 +37,6 @@ static const char *kFabric = "doca";
 #endif
 
 #define PORT 18519
-#define SLOT 4096
 
 static int peer_sock(const char *peer)
 {
@@ -119,6 +118,9 @@ int main(int argc, char **argv)
 	const int window = env_int("LAT_WINDOW", 1);
 	const int nthr = env_int("LAT_THREADS", 1);
 	const size_t msg = (size_t)env_int("LAT_SIZE", 4080);
+	/* One slot per message, page aligned; a 4 KB slot carries the default 4080-byte message. */
+	const size_t slot_bytes = (msg + 4095) & ~(size_t)4095;
+	const int warmup = env_int("LAT_WARMUP", 0);
 	/* The host-side knob of the E1 evaluation: a sleep before each completion poll. The device
 	 * finished at the same time; the program only looked later. */
 	const int sleep_us = env_int("LAT_SLEEP_US", 0);
@@ -126,7 +128,7 @@ int main(int argc, char **argv)
 	/* One receive slot per in-flight message per thread, plus the same again for sends, so no two
 	 * messages ever share a buffer. */
 	const int nslot = window * nthr;
-	const size_t len = (size_t)SLOT * nslot * 2;
+	const size_t len = (size_t)slot_bytes * nslot * 2;
 	char *mem = (char *)aligned_alloc(64, len);
 	memset(mem, 0, len);
 	/* dc civac is clean-and-invalidate, the only cache op at EL0, so it writes a dirty line back
@@ -143,8 +145,8 @@ int main(int argc, char **argv)
 	f.connect(0, sock, server);
 	f.wait_connected();
 
-	const size_t recv_off = 0, send_off = (size_t)SLOT * nslot;
-	for (int i = 0; i < nslot; i++) f.post_recv(0, recv_off + (size_t)i * SLOT, SLOT, 1000 + i);
+	const size_t recv_off = 0, send_off = (size_t)slot_bytes * nslot;
+	for (int i = 0; i < nslot; i++) f.post_recv(0, recv_off + (size_t)i * slot_bytes, slot_bytes, 1000 + i);
 	{
 		char sync = 1;
 		if (write(sock, &sync, 1) != 1 || read(sock, &sync, 1) != 1) return 1;
@@ -158,14 +160,14 @@ int main(int argc, char **argv)
 	std::mutex seen_lock;
 	std::vector<bool> seen;
 	auto stamp = [&](int slot) {
-		uint64_t *p = (uint64_t *)(mem + send_off + (size_t)slot * SLOT);
+		uint64_t *p = (uint64_t *)(mem + send_off + (size_t)slot * slot_bytes);
 		p[0] = next_id.fetch_add(1, std::memory_order_relaxed);
 		outstanding[slot] = p[0];
 		clean_range(p, msg);
 	};
 	auto payload_id = [&](int slot) {
-		invalidate_range(mem + recv_off + (size_t)slot * SLOT, msg);
-		return *(const uint64_t *)(mem + recv_off + (size_t)slot * SLOT);
+		invalidate_range(mem + recv_off + (size_t)slot * slot_bytes, msg);
+		return *(const uint64_t *)(mem + recv_off + (size_t)slot * slot_bytes);
 	};
 	auto verify = [&](int slot) {
 		const uint64_t id = payload_id(slot);
@@ -237,10 +239,10 @@ int main(int argc, char **argv)
 					if (c.op != buddy::rdma::Fabric::OP_RECV) continue;
 					const uint64_t slot = c.wr_id - 1000;
 					const uint64_t id = payload_id((int)slot);
-					*(uint64_t *)(mem + send_off + slot * SLOT) = id;
-					clean_range(mem + send_off + slot * SLOT, msg);
-					f.send_imm(0, 0, 0x1, send_off + slot * SLOT, msg, 500 + slot);
-					f.post_recv(0, recv_off + slot * SLOT, SLOT, 1000 + slot);
+					*(uint64_t *)(mem + send_off + slot * slot_bytes) = id;
+					clean_range(mem + send_off + slot * slot_bytes, msg);
+					f.send_imm(0, 0, 0x1, send_off + slot * slot_bytes, msg, 500 + slot);
+					f.post_recv(0, recv_off + slot * slot_bytes, slot_bytes, 1000 + slot);
 					done.fetch_add(1, std::memory_order_relaxed);
 				}
 			});
@@ -261,7 +263,8 @@ int main(int argc, char **argv)
 	std::vector<int> free_slots;
 	std::mutex pool_lock, lat_lock;
 	std::atomic<int> claimed{0};
-	const int total = rounds * nthr;
+	const int total = (rounds + warmup) * nthr;
+	std::atomic<double> t_warm{t_start};
 	for (int i = 0; i < nslot; i++) free_slots.push_back(i);
 
 	for (int t = 0; t < nthr; t++) {
@@ -284,7 +287,7 @@ int main(int argc, char **argv)
 						free_slots.pop_back();
 					}
 					issued[slot] = now_us();
-					f.send_imm(0, 0, 0x1, send_off + (size_t)slot * SLOT, msg,
+					f.send_imm(0, 0, 0x1, send_off + (size_t)slot * slot_bytes, msg,
 						   500 + slot);
 				}
 				if (sleep_us) usleep(sleep_us);
@@ -292,12 +295,13 @@ int main(int argc, char **argv)
 				if (c.op != buddy::rdma::Fabric::OP_RECV) continue;
 				const int slot = (int)(c.wr_id - 1000);
 				mine.push_back(now_us() - issued[slot]);
-				f.post_recv(0, recv_off + (size_t)slot * SLOT, SLOT, 1000 + slot);
+				f.post_recv(0, recv_off + (size_t)slot * slot_bytes, slot_bytes, 1000 + slot);
 				{
 					std::lock_guard<std::mutex> g(pool_lock);
 					free_slots.push_back(slot);
 				}
-				done.fetch_add(1, std::memory_order_relaxed);
+				if (done.fetch_add(1, std::memory_order_relaxed) + 1 == warmup * nthr)
+					t_warm.store(now_us(), std::memory_order_relaxed);
 			}
 			std::lock_guard<std::mutex> g(lat_lock);
 			per_thread[0].insert(per_thread[0].end(), mine.begin(), mine.end());
@@ -307,6 +311,8 @@ int main(int argc, char **argv)
 
 	for (auto &th : threads) th.join();
 	const double elapsed = now_us() - t_start;
+	const double timed = now_us() - t_warm.load(std::memory_order_relaxed);
+	const long timed_ops = done.load() - (long)warmup * nthr;
 	finished.store(true, std::memory_order_relaxed);
 	watchdog.join();
 
@@ -318,9 +324,9 @@ int main(int argc, char **argv)
 		       kFabric, window, nthr, all.size(), all.front(), all[all.size() / 2],
 		       all[all.size() * 99 / 100], done.load() * 1e6 / elapsed,
 		       bad.load(std::memory_order_relaxed));
-	/* The one line every E1 program prints. */
-	printf("ops=%ld bytes=%zu wall_ns=%.0f sleep_us=%d window=%d\n", done.load(), msg,
-	       elapsed * 1e3 / (done.load() ? done.load() : 1), sleep_us, window);
+	/* The one line every E1 program prints, over the operations after the warm-up. */
+	printf("ops=%ld bytes=%zu wall_ns=%.0f sleep_us=%d window=%d\n", timed_ops, msg,
+	       timed * 1e3 / (timed_ops > 0 ? timed_ops : 1), sleep_us, window);
 	fflush(stdout);
 
 	{
