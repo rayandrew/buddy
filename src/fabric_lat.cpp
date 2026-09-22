@@ -250,7 +250,9 @@ int main(int argc, char **argv)
 					const uint64_t id = payload_id((int)slot);
 					*(uint64_t *)(mem + send_off + slot * slot_bytes) = id;
 					clean_range(mem + send_off + slot * slot_bytes, msg);
-					f.send_imm(0, 0, 0x1, send_off + slot * slot_bytes, msg, 500 + slot);
+					/* The id rides in the immediate too, so a trace of the NIC's completions
+					 * can pair a message with its reply across the two nodes. */
+					f.send_imm(0, 0, (uint32_t)id, send_off + slot * slot_bytes, msg, 500 + slot);
 					f.post_recv(0, recv_off + slot * slot_bytes, slot_bytes, 1000 + slot);
 					done.fetch_add(1, std::memory_order_relaxed);
 				}
@@ -296,9 +298,13 @@ int main(int argc, char **argv)
 						slot = free_slots.back();
 						free_slots.pop_back();
 					}
+					/* A fresh id per message, in the payload and the immediate: the
+					 * server echoes it, so the NIC's completions on both nodes carry
+					 * one key per round trip. */
+					stamp(slot);
 					issued[slot] = now_us();
-					f.send_imm(0, 0, 0x1, send_off + (size_t)slot * slot_bytes, msg,
-						   500 + slot);
+					f.send_imm(0, 0, (uint32_t)outstanding[slot],
+						   send_off + (size_t)slot * slot_bytes, msg, 500 + slot);
 					posted = true;
 				}
 				/* Once per send, not per poll: the time the host looks away after posting. */
