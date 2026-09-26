@@ -1,5 +1,5 @@
-/* Device half of the DPA-native echo. Proves the architecture DESIGN-DPA.md calls for: buffers in
- * DPA memory, a thread woken by completions, and no Arm involvement once traffic starts.
+/* Device half of the DPA-native echo: buffers in DPA memory, a thread woken by completions, and
+ * no Arm involvement once traffic starts.
  *
  * Nothing here touches host memory, so there is no window, no cache maintenance and no submit or
  * completion ring. Buffers are plain device pointers registered for RDMA with

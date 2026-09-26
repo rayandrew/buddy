@@ -2,8 +2,7 @@
  *
  * The point is what it does NOT do. After echo_start the Arm issues no submits, polls no ring and
  * performs no cache maintenance; every message is received, echoed and re-armed on the DPA. The
- * rate it reports is therefore what the DPA leg can do with the Arm out of the data path, which is
- * the number DESIGN-DPA.md rests on.
+ * rate it reports is therefore what the DPA leg can do with the Arm out of the data path.
  *
  *   node A: dpa-echo --server        node B: dpa-echo --peer <A-ip>
  */

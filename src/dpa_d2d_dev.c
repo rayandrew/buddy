@@ -2,7 +2,7 @@
  *
  * Everything here reaches its buffers with an ordinary load, because they are DPA memory registered
  * for RDMA with doca_mmap_set_dpa_memrange. There is no window, no cache maintenance, and no ring
- * shared with the Arm. See DESIGN-DPA.md for why the first version had all three.
+ * shared with the Arm.
  *
  * One engine drives one thread. The receive pool is split across engines because the record walk is
  * serial inside a buffer but independent across buffers.
@@ -399,8 +399,8 @@ __dpa_global__ void d2d_handler(uint64_t arg)
 		while (drained < D2D_DRAIN_MAX && doca_dpa_dev_get_completion(e->comp, &el)) {
 			const doca_dpa_dev_completion_type_t t =
 				doca_dpa_dev_get_completion_type(el);
-			/* One at a time: acking a whole drain in one call frees nothing and the queue
-			 * fills exactly once. Measured, see DESIGN-DPA.md. */
+			/* One at a time: acking a whole drain in one call frees nothing and the
+			 * queue fills exactly once. */
 			doca_dpa_dev_completion_ack(e->comp, 1);
 			drained++;
 

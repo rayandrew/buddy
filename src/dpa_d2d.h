@@ -17,7 +17,7 @@ class HostLeg;
 
 // DPA-native D2D engine: the device receives, routes and forwards, and the Arm is not in the data
 // path. Buffers are DPA memory registered for RDMA, so the kernel reads them with a plain load and
-// a forward is posted straight out of the buffer a message arrived in. See DESIGN-DPA.md.
+// a forward is posted straight out of the buffer a message arrived in.
 //
 // One engine drives one DPA thread over its own queue pair and its own slice of the receive pool,
 // because the record walk is serial inside a buffer and independent across buffers.
